@@ -1,0 +1,5 @@
+hermes-agent-si
+Copyright 2026 Joel Brilliant
+
+This product includes software from agent-si and agent-memory (Apache-2.0), both by Joel Brilliant,
+vendored under vendor/ with their own LICENSE and NOTICE files. See vendor/VENDORED.md.

@@ -1,0 +1,17 @@
+name: agent-si
+version: 0.1.0
+description: "Sourced, model-free memory for Hermes: a brain of facts with sources and quotes, plus search over your past Hermes, Claude Code, Codex and Grok sessions on this machine. No model, no key, no network. It refuses to store words you didn't say and says when sources disagree."
+author: Joel Brilliant
+license: Apache-2.0
+homepage: https://github.com/joelbrilliant/hermes-agent-si
+requires_hermes: ">=0.22.0"
+hooks:
+  - prefetch
+  - queue_prefetch
+  - sync_turn
+  - on_turn_start
+  - on_session_switch
+provides_tools: []
+requires_env: []
+config_keys:
+  - memory.agent-si

@@ -1,0 +1,19 @@
+{
+  "packet_version": 1,
+  "change_id": "notes-demo-migration-note-1",
+  "agent": "notes",
+  "intent": "A later note that disagrees with the setup note about the compliance platform's region",
+  "ops": [
+    {
+      "op": "add_source",
+      "row": {
+        "id": "src-demo-migration-note",
+        "kind": "user_note",
+        "title": "Migration note",
+        "source_date": "2026-10-20",
+        "author_person_id": null,
+        "content": "Migration note, 20 October 2026. During the October maintenance window the compliance platform workspace was moved to the US regional instance, at us.compliance.example.com. Casey Example ran the move."
+      }
+    }
+  ]
+}

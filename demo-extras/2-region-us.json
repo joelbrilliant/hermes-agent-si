@@ -1,0 +1,23 @@
+{
+  "packet_version": 1,
+  "change_id": "assistant-demo-region-us-claim-1",
+  "agent": "assistant",
+  "intent": "A second source claims a different region for the compliance platform; the fact becomes disputed",
+  "ops": [
+    {
+      "op": "add_claim",
+      "source": {
+        "source_id": "src-demo-migration-note",
+        "locator": "para 1"
+      },
+      "row": {
+        "id": "clm-demo-compliance-instance-us",
+        "key": "vendor.compliance.instance",
+        "value_raw": "US",
+        "basis": "reported",
+        "as_of": "2026-10-20",
+        "quote": "moved to the US regional instance"
+      }
+    }
+  ]
+}
