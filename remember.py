@@ -11,7 +11,10 @@ MIN_QUOTE_WORDS = 5
 MAX_QUOTE_CHARS = 600
 MAX_FACT_CHARS = 2000
 MAX_TITLE_CHARS = 120
+MAX_VALUE_CHARS = 200
+MAX_KEY_CHARS = 120
 KINDS = ("note", "process", "learning", "gotcha", "reference", "question")
+FACT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")  # the engine's FACT_KEY
 
 _SPACE = re.compile(r"\s+")
 _QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', " ": " "})
@@ -39,6 +42,13 @@ def quote_problem(quote: str) -> str | None:
         return f"quote at least {MIN_QUOTE_WORDS} consecutive words of the user's own message (got {len(words)})"
     if len(quote) > MAX_QUOTE_CHARS:
         return f"the quote is longer than {MAX_QUOTE_CHARS} characters; quote the sentence that carries the fact"
+    return None
+
+
+def key_problem(key: str) -> str | None:
+    if len(key) > MAX_KEY_CHARS or not FACT_KEY_RE.fullmatch(key):
+        return ("a fact key is two or more lower-case dotted parts of letters, digits and underscores, such as "
+                "office.brisbane.lease_move_date")
     return None
 
 
@@ -78,6 +88,28 @@ def source_packet(*, collector: str, source: str, session_id: str, message: str,
                 "author_person_id": author_person_id,
                 "content": message,
             },
+        }],
+    }
+
+
+def claim_id(session_id: str, key: str, value: str, quote: str) -> str:
+    return f"clm-hermes-{digest(session_id, key, value, quote, size=12)}"
+
+
+def claim_packet(*, agent: str, claim: str, key: str, value: str, quote: str, source: str, locator: str,
+                 today: date) -> dict:
+    """One claim for a fact key, from the captured message. A second source with another value makes the fact
+    disputed; the engine never overwrites one claim with another."""
+    return {
+        "packet_version": 1,
+        "change_id": f"{agent}-{claim[4:]}",
+        "agent": agent,
+        "intent": f"A claim for {key} from the user's message",
+        "ops": [{
+            "op": "add_claim",
+            "source": {"source_id": source, "locator": locator},
+            "row": {"id": claim, "key": key, "value_raw": value, "basis": "reported", "as_of": today.isoformat(),
+                    "quote": quote.strip()},
         }],
     }
 

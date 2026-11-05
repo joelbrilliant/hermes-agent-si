@@ -198,6 +198,41 @@ class Brain:
     def apply_file(self, path: Path) -> dict:
         return self.apply(json.loads(Path(path).read_text(encoding="utf-8")))
 
+    def register_fact_key(self, key: str, description: str) -> dict:
+        """Fact keys are schema: the engine takes them only from brain.toml through apply-config (upsert_fact_key is
+        ungrantable to agents). Append one [[fact_keys]] block, check the config still loads, then apply it."""
+        if not re.fullmatch(schemas.FACT_KEY, key):
+            return {"status": "rejected", "error": f"{key!r} is not a fact key"}
+        toml_path = self.dir / "brain.toml"
+        with self._write_lock:
+            text = toml_path.read_text(encoding="utf-8")
+            if re.search(rf'^\s*key\s*=\s*"{re.escape(key)}"\s*$', text, re.M):
+                return {"status": "exists"}
+            description = re.sub(r"\s+", " ", str(description or "")).strip()[:200] or key
+            block = ("\n[[fact_keys]]\n"
+                     f'key = "{key}"\n'
+                     'value_type = "text"\n'
+                     'unit = ""\n'
+                     "stale_after_days = 365\n"
+                     f"description = {json.dumps(description, ensure_ascii=False)}\n")
+            candidate = toml_path.with_name(".brain.toml.next")
+            candidate.write_text(text + block, encoding="utf-8")
+            try:
+                brain_config.load_config(candidate)
+            except Exception as exc:
+                candidate.unlink(missing_ok=True)
+                return {"status": "rejected", "error": f"the new fact key would break brain.toml: {exc}"}
+            candidate.replace(toml_path)
+            try:
+                outcome = brain_init.apply_config(self.dir)
+            except Exception as exc:
+                return {"status": "error", "error": f"apply-config failed: {type(exc).__name__}: {exc}"}
+        if outcome is None:
+            return {"status": "applied", "note": "nothing to apply"}
+        receipt = dict(outcome.receipt)
+        receipt["exit_code"] = outcome.exit_code
+        return receipt
+
 
 # -- the Example Co demo -------------------------------------------------------------------------------------
 

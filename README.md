@@ -39,7 +39,17 @@ hermes agent-si demo         # builds Example Co and selects it; --off switches 
 |---|---|
 | `brain_search(query, limit, side)` | One ranked list over the brain (records, facts, people, projects, open work) and past sessions, fused by reciprocal rank. Each hit says which side found it. Keyword search: use the words the user would have used. |
 | `brain_get(id, offset)` | One hit in full: a brain row with its sources, quotes and related rows, a fact key with every source that claims a value (and whether they disagree), or a past session's messages. |
-| `brain_remember(fact, quote, title, kind)` | Keeps something the user said as a sourced record. The quote must be at least five consecutive words copied exactly from one of the user's messages in this conversation. The message is stored as the source, the record cites it, and the evidence gate checks the quote against it. |
+| `brain_remember(fact, quote, key, value, title, kind)` | Keeps something the user said, with their message as the source. The quote must be at least five consecutive words copied exactly from one of the user's messages in this conversation. With `key` and `value` it is a tracked fact; without them, a sourced note. |
+
+Two shapes of memory:
+
+- **A fact**, with a dotted key such as `office.brisbane.lease_move_date` and the value as the user stated
+  it. The key is registered in the brain's own schema on first use. `brain_get` on the key shows every
+  claim with its source and date. A later different value, from this conversation or any other source, is
+  kept as a second claim and the fact becomes **disputed**: the brief says "Ask a person" and the model is
+  told not to pick one. Nothing is overwritten.
+- **A note**, free text citing the message. The brain labels note bodies as agent-written, so notes are for
+  context and procedures, and facts are for things an answer depends on.
 
 The gate refuses two things, and the refusal goes back to the model word for word:
 
