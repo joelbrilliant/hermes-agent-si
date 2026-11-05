@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sys
 import threading
@@ -219,7 +218,7 @@ class AgentSiMemoryProvider(MemoryProvider):
 
     def backup_paths(self) -> list[str]:
         """A brain the user keeps outside this Hermes home; everything else already lives inside it."""
-        home = self._home or settings.hermes_home()
+        home = (self._home or settings.hermes_home()).resolve()
         folder, chosen = settings.brain_dir(home)
         if chosen and folder.is_dir() and home not in folder.resolve().parents:
             return [str(folder)]
