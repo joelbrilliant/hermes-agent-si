@@ -1,5 +1,8 @@
-"""Where the plugin keeps things inside one Hermes home, and the small non-secret settings file the setup wizard
-and the dashboard write: $HERMES_HOME/agent-si.json with principal, brain_dir and index_sessions. No secrets."""
+"""Where the plugin keeps things inside one Hermes home, and the small non-secret settings file the setup wizard,
+the Desktop panel, the CLI and the provider share: $HERMES_HOME/agent-si/config.json with principal, brain_dir and
+index_sessions. That is the flat JSON file Hermes reads and writes for a provider's dashboard panel
+(config_schema.py declares STORAGE_FLAT_JSON), so a change made in Desktop is the change the provider sees.
+0.1.0 kept the file at $HERMES_HOME/agent-si.json; load() moves it once. No secrets."""
 from __future__ import annotations
 
 import json
@@ -11,6 +14,8 @@ from pathlib import Path
 PROVIDER = "agent-si"
 BRAIN_NAME = "brain"
 DEMO_NAME = "demo"
+SETTINGS_NAME = "config.json"            # hermes_cli/web_routers/memory_providers._flat_json_path: home / name / config.json
+LEGACY_SETTINGS_NAME = f"{PROVIDER}.json"  # 0.1.0
 _TRUE = {"1", "true", "yes", "y", "on"}
 _FALSE = {"0", "false", "no", "n", "off", ""}
 
@@ -21,7 +26,13 @@ def hermes_home(given: str | os.PathLike | None = None) -> Path:
 
 
 def settings_path(home: Path) -> Path:
-    return Path(home) / f"{PROVIDER}.json"
+    """$HERMES_HOME/agent-si/config.json: the file Hermes' dashboard panel reads and writes for this provider."""
+    return data_dir(home) / SETTINGS_NAME
+
+
+def legacy_settings_path(home: Path) -> Path:
+    """Where 0.1.0 kept the settings. load() moves it to settings_path() once."""
+    return Path(home) / LEGACY_SETTINGS_NAME
 
 
 def data_dir(home: Path) -> Path:
@@ -42,6 +53,8 @@ def sessions_db(home: Path) -> Path:
 
 def load(home: Path) -> dict:
     path = settings_path(home)
+    if not path.exists():
+        path = _adopt_legacy(home, path)
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
@@ -49,14 +62,35 @@ def load(home: Path) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def _adopt_legacy(home: Path, path: Path) -> Path:
+    """Move a 0.1.0 settings file to where the dashboard panel looks, once. Returns the file to read."""
+    legacy = legacy_settings_path(home)
+    if not legacy.is_file():
+        return path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy, path)
+        return path
+    except OSError:
+        return legacy
+
+
+def _stored(key: str, value):
+    """The JSON the dashboard panel stores for this key: the bool field as true/false, text stripped."""
+    if key == "index_sessions":
+        return as_bool(value, True)
+    return value.strip() if isinstance(value, str) else value
+
+
 def save(home: Path, values: dict) -> dict:
-    """Merge values into the settings file, atomically, owner-readable only. An empty value removes the key."""
+    """Merge values into the settings file, atomically, owner-readable only, in the form the dashboard panel
+    stores them. An empty value removes the key."""
     current = load(home)
     for key, value in dict(values or {}).items():
         if value is None or (isinstance(value, str) and not value.strip()):
             current.pop(key, None)
         else:
-            current[key] = value.strip() if isinstance(value, str) else value
+            current[key] = _stored(key, value)
     path = settings_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".agent-si.", suffix=".json", dir=str(path.parent))

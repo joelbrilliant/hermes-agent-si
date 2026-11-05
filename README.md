@@ -59,8 +59,10 @@ The gate refuses two things, and the refusal goes back to the model word for wor
 
 ## Config
 
-`hermes memory setup` asks for three things and writes `$HERMES_HOME/agent-si.json`. The Desktop config
-panel (Capabilities, Tools, Memory) edits the same file.
+`hermes memory setup` asks for three things and writes `$HERMES_HOME/agent-si/config.json`. The Desktop config
+panel (Capabilities, Tools, Memory) reads and writes the same file, so turning `index_sessions` off there is what
+the provider sees from its next session. (0.1.0 kept the file at `$HERMES_HOME/agent-si.json`; it is moved on
+first load.)
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -102,8 +104,8 @@ sources for the principal. Run `brain apply-config` on that brain afterwards.
   Claude Code (`~/.claude/projects`), Codex (`~/.codex/sessions`) and Grok (`~/.grok/sessions`) when they
   exist. Turn `index_sessions` off to stop this.
 - **Writes**, inside the active Hermes home only: `agent-si/brain/` (the brain), `agent-si/sessions.db`
-  (the index), `agent-si/demo/` when you build the demo, and `agent-si.json` (settings). A `brain_dir` you
-  choose is the one exception.
+  (the index), `agent-si/demo/` when you build the demo, and `agent-si/config.json` (settings). A `brain_dir`
+  you choose is the one exception.
 - **No network calls, no model, no shell commands, no credentials.** One background thread refreshes the
   index after each turn. Nothing phones home; the engine's own usage log is off in this plugin.
 - Under cron and subagent runs the tools still answer, and no indexing is started.
@@ -135,6 +137,9 @@ here because Hermes installs plugin dependencies only from a package index and n
 - The quote rule is strict on purpose. Five words the user typed, or the fact is not kept.
 - The index reads Hermes `state.db` schemas from 2026; a schema change upstream shows up as fewer Hermes
   sessions in `hermes agent-si status`, never as an error in a turn.
+- The vendored engine and session index sit on `sys.path` under their upstream module names (`brain`,
+  `session_continuity`, `session_adapters`, `db_permissions`, `ingest`), appended last. Another plugin shipping a
+  module with one of those names would collide. A later release moves them under one `agent_si_vendor` package.
 
 ## Development
 

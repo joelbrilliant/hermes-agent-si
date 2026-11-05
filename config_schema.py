@@ -1,6 +1,7 @@
 """Dashboard config panel for the agent-si memory provider (Desktop, Capabilities, Tools, Memory). Loaded by path,
-never imported as a package, so it imports only Hermes' pure-data schema module. Values live in
-$HERMES_HOME/agent-si.json, the same file the setup wizard writes through save_config()."""
+never imported as a package, so it imports only Hermes' pure-data schema module. storage=STORAGE_FLAT_JSON means
+Hermes itself reads and writes $HERMES_HOME/agent-si/config.json for this panel; settings.py points the setup
+wizard, the provider and the CLI at that same file, so a value changed here is the value the provider uses."""
 from plugins.memory.config_schema import (
     KIND_BOOL,
     KIND_TEXT,

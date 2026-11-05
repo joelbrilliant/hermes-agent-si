@@ -1,5 +1,5 @@
 name: agent-si
-version: 0.1.0
+version: 0.1.1
 description: "Sourced, model-free memory for Hermes: a brain of facts with sources and quotes, plus search over your past Hermes, Claude Code, Codex and Grok sessions on this machine. No model, no key, no network. It refuses to store words you didn't say and says when sources disagree."
 author: Joel Brilliant
 license: Apache-2.0
