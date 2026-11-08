@@ -8,9 +8,12 @@ disagree instead of picking one.
 ## Install
 
 ```bash
-hermes plugins install joelbrilliant/hermes-agent-si
-hermes memory setup          # pick agent-si, type your name
+hermes plugins install agent-si      # from the Hermes plugin catalog
+hermes memory setup                  # pick agent-si, type your name
 ```
+
+The catalog installs the reviewed release at its pinned commit. For the latest commit on main instead:
+`hermes plugins install joelbrilliant/hermes-agent-si`.
 
 Start a new Hermes session. The brain is created on first run at `$HERMES_HOME/agent-si/brain`. Nothing
 is downloaded and nothing is installed into Hermes' Python: the engine and the session index are vendored
