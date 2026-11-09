@@ -1,9 +1,17 @@
-# agent-si for Hermes Agent
+# agent-si
 
-Sourced, model-free memory. A brain of facts that cite sources and quotes, plus search over your past
-Hermes, Claude Code, Codex and Grok sessions on this machine, in one ranked list. No model, no API key, no
-network, no Python dependencies. It refuses to store words you didn't say, and it tells you when sources
-disagree instead of picking one.
+## Your agent stops inventing answers and starts answering from facts
+
+**Anti-hallucination memory for Hermes. Simple, fast, accurate. No LLM.**
+
+- **Much less hallucinating.** Hermes answers from facts it can source, not from guesses it made up. agent-si keeps a
+  memory only when it can quote you, five words minimum. No quote, no memory.
+- **One search, every agent.** Your past Hermes, Claude Code, Codex and Grok sessions on this machine, in one ranked
+  list.
+- **It won't guess.** Two sources disagree, you get both and a question. Never a coin flip.
+- **No LLM, no key, no cloud.** A SQLite file and a script. A lookup takes a fraction of a second, and nothing leaves
+  your machine.
+- **Proven.** 82% of LongMemEval questions find the right session in the top five (386 of 470), with no model at all.
 
 ## Install
 
