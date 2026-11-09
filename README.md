@@ -11,7 +11,8 @@
 - **It won't guess.** Two sources disagree, you get both and a question. Never a coin flip.
 - **No LLM, no key, no cloud.** A SQLite file and a script. A lookup takes a fraction of a second, and nothing leaves
   your machine.
-- **Proven.** 82% of LongMemEval questions find the right session in the top five (386 of 470), with no model at all.
+- **Proven.** On LongMemEval's 470 answerable questions, a right session is in the top five for 450 (96%), and every
+  session the answer needs for 392 (83%). No model at all.
 
 ## Install
 
@@ -48,8 +49,8 @@ hermes agent-si demo         # builds Example Co and selects it; --off switches 
 
 | Tool | What it does |
 |---|---|
-| `brain_search(query, limit, side)` | One ranked list over the brain (records, facts, people, projects, open work) and past sessions, fused by reciprocal rank. Each hit says which side found it. Keyword search: use the words the user would have used. |
-| `brain_get(id, offset)` | One hit in full: a brain row with its sources, quotes and related rows, a fact key with every source that claims a value (and whether they disagree), or a past session's messages. |
+| `brain_search(query, limit, side, since, until)` | One ranked list over the brain (records, facts, people, projects, open work) and past sessions, fused by reciprocal rank. Each hit says which side found it. Keyword search: a hit can match any of the words, with more and rarer matches first. `since` and `until` (YYYY-MM-DD) keep hits dated inside those days, so "what did we talk about yesterday?" works: when no word matches in the period, the period's sessions come back, newest first. |
+| `brain_get(id, offset)` | One hit in full: a brain row with its sources, quotes and related rows, a fact key with every source that claims a value (and whether they disagree), or a past session's messages, a page at a time. A session hit carries `open_at`, the offset that opens it just before the excerpt. |
 | `brain_remember(fact, quote, key, value, title, kind)` | Keeps something the user said, with their message as the source. The quote must be at least five consecutive words copied exactly from one of the user's messages in this conversation. With `key` and `value` it is a tracked fact; without them, a sourced note. |
 
 Two shapes of memory:
@@ -123,8 +124,10 @@ sources for the principal. Run `brain apply-config` on that brain afterwards.
 
 ## Measured
 
-- The session index is agent-memory's. On LongMemEval's 470 questions it returns the right session in its
-  top five for 386, with no model (`benchmarks/` in the agent-memory repository).
+- The session index is agent-memory's. On LongMemEval's 470 answerable questions, with no model, its top five held
+  at least one right session for 450 and every session the answer needs for 392, which is the benchmark's strict
+  count (measured 2 November 2026 with user and assistant turns indexed, as the plugin indexes them).
+  `benchmarks/longmemeval_compare.py` in the agent-memory repository runs the same recall on user turns only.
 - The brain's keyword search is the agent-si engine's, the same search its own MCP server answers. On 327
   real agent searches judged blind, it put a right record first 185 times; a local embedding model blended
   in by rank raised that to 209, which is why a model stays an option, not a requirement.

@@ -26,7 +26,7 @@ from . import fuse
 from . import remember as evidence
 from . import settings
 from .brainside import AGENT, COLLECTOR, Brain
-from .history import History, roots_for
+from .history import History, day_bounds, roots_for
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ HARNESSES = ("hermes", "claude", "codex", "grok")
 RULES = """Rules for this memory:
 - Facts about the user, their people, plans, systems and past work come from brain_search and brain_get, never from memory or prose. Name the source and its date when it matters.
 - If the brain has nothing on it, say so plainly. Do not guess, and do not agree just to fill the gap.
+- For a question about a time (yesterday, last week, in March), pass since and until dates to brain_search.
 - A fact marked disputed has sources that disagree. Say so and ask the person. Do not pick one.
 - Rows the brain labels unsourced are an agent's notes, not facts.
 - brain_remember keeps something only with at least five consecutive words the user actually typed in this conversation. If the gate refuses, tell the user why. Do not reword their meaning to get it through.
@@ -59,9 +60,12 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Search the user's brain (facts, records, people, projects, open work, each with a source and date) and "
             "the history of past agent sessions on this machine (Hermes, Claude Code, Codex, Grok) in one ranked list. "
-            "Keyword search, no model: use the words the user would have used. Call it before answering anything "
-            "about the user's facts, plans, people or past work. Each hit says which side found it; open a hit with "
-            "brain_get before relying on it. If nothing comes back, say the brain has nothing on it."
+            "Keyword search, no model: use the words the user would have used. A hit can match any of the words, "
+            "with more and rarer matches first, so search again with other words when the first try misses. Call it "
+            "before answering anything about the user's facts, plans, people or past work. For a question about a "
+            "time, pass since and until; with dates, words that match nothing give that period's sessions, newest "
+            "first, and query may be left out. Each hit says which side found it; open a hit with brain_get before "
+            "relying on it. If nothing comes back, say the brain has nothing on it."
         ),
         "parameters": {
             "type": "object",
@@ -70,8 +74,12 @@ TOOLS: list[dict[str, Any]] = [
                 "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8},
                 "side": {"type": "string", "enum": ["all", "truth", "history"], "default": "all",
                          "description": "all (default), truth (the brain only) or history (past sessions only)."},
+                "since": {"type": "string",
+                          "description": "Only hits dated on or after this local day, YYYY-MM-DD."},
+                "until": {"type": "string",
+                          "description": "Only hits dated on or before this local day, YYYY-MM-DD."},
             },
-            "required": ["query"],
+            "required": [],
         },
     },
     {
@@ -80,7 +88,8 @@ TOOLS: list[dict[str, Any]] = [
             "Open one hit in full: a brain row with its sources, quotes and related rows (ids like rec-…, src-…, "
             "act-…, dec-…, per-…, a project id, or a fact key such as vendor.compliance.instance, which also shows "
             "whether sources disagree), or a past session's messages (an id like hermes:<session id> as brain_search "
-            "shows it). Long bodies come in pages: pass offset."
+            "shows it; pass the hit's open_at as offset to start just before its excerpt). Long bodies come in "
+            "pages: pass offset."
         ),
         "parameters": {
             "type": "object",
@@ -259,22 +268,37 @@ class AgentSiMemoryProvider(MemoryProvider):
     def _ready(self) -> bool:
         return self._brain is not None and self._brain.exists or (self._history is not None and self._history.enabled)
 
-    def _search(self, query: str, *, limit: int, side: str, session_id: str) -> list[dict]:
+    def _search(self, query: str, *, limit: int, side: str, session_id: str, all_terms_first: bool = False,
+                since: str = "", until: str = "") -> tuple[list[dict], bool]:
+        """The merged hits, and whether the history side is the period's sessions because no word matched there.
+        since and until are local YYYY-MM-DD days, both included; day_bounds raises ValueError on another shape."""
+        start, end = day_bounds(since, until)
+        dated = start is not None or end is not None
         truth: list[dict] = []
         history: list = []
+        listed = False
         if side in ("all", "truth") and self._brain is not None and self._brain.exists:
             truth = self._brain.search(query, TRUTH_LIST)
+            if dated:
+                truth = [hit for hit in truth if hit.get("date")
+                         and (not since or str(hit["date"])[:10] >= since)
+                         and (not until or str(hit["date"])[:10] <= until)]
         if side in ("all", "history") and self._history is not None:
-            history = self._history.search(query, limit=HISTORY_LIST, current_session_id=session_id or None)
-        return fuse.merge(truth, history, limit)
+            history = self._history.search(query, limit=HISTORY_LIST, current_session_id=session_id or None,
+                                           all_terms_first=all_terms_first, since=start, before=end)
+            if dated and not history:
+                history = self._history.period(start, end, limit=HISTORY_LIST, current_session_id=session_id or None)
+                listed = bool(history)
+        return fuse.merge(truth, history, limit), listed
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._status = None
         if is_trivial_prompt(query) or not self._ready():
             return ""
         try:
-            items = self._search(_query_text(query), limit=PREFETCH_HITS, side="all",
-                                 session_id=session_id or self._session_id)
+            # Recall nobody asked for keeps messages holding every word first, as agent-memory's own hook does.
+            items, _ = self._search(_query_text(query), limit=PREFETCH_HITS, side="all",
+                                    session_id=session_id or self._session_id, all_terms_first=True)
         except Exception as exc:
             logger.warning("agent-si prefetch failed: %s", exc)
             return ""
@@ -345,8 +369,9 @@ class AgentSiMemoryProvider(MemoryProvider):
 
     def _tool_search(self, args: dict) -> dict:
         query = str(args.get("query") or "").strip()
-        if not query:
-            return {"error": "query is required"}
+        since, until = str(args.get("since") or "").strip(), str(args.get("until") or "").strip()
+        if not query and not (since or until):
+            return {"error": "query is required (or pass since and until to list a period's sessions)"}
         try:
             limit = max(1, min(int(args.get("limit") or 8), 25))
         except (TypeError, ValueError):
@@ -356,13 +381,22 @@ class AgentSiMemoryProvider(MemoryProvider):
             return {"error": "side must be all, truth or history"}
         if self._brain is None or (not self._brain.exists and side == "truth"):
             return {"error": self._setup_error or "the brain is not set up; run hermes memory setup"}
-        items = self._search(query, limit=limit, side=side, session_id=self._session_id)
+        try:
+            items, listed = self._search(query, limit=limit, side=side, session_id=self._session_id,
+                                         since=since, until=until)
+        except ValueError:
+            return {"error": "since and until are local days written like 2026-11-09"}
         out = {
             "query": query,
             "hits": items,
             "truth_hits": sum(1 for item in items if item["side"] == "truth"),
             "history_hits": sum(1 for item in items if item["side"] == "history"),
         }
+        if since or until:
+            out["since"], out["until"] = since, until
+        if listed:
+            out["note"] = ("No past session in that period matches these words, so the history hits are the "
+                           "period's sessions, newest first.")
         if not items:
             out["answer"] = ("Nothing in the brain or the session index matches this. Say the brain has nothing on it "
                              "rather than guessing; try other words only if the user would have used them.")

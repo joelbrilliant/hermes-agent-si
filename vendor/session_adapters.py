@@ -222,34 +222,53 @@ def clean_message_content(role: str, content: str) -> str:
 
 
 def discover_hermes(path: Path, *, strict=False) -> list[SessionDescriptor]:
+    """Hermes sessions a person took part in. Older state.db files carry the surface (cli, telegram...) in
+    sessions.source. Current Hermes writes source 'local' and the surface in a created_source column, so when that
+    column exists the query also takes source = 'local' rows whose created_source is a human surface. Rows that
+    still carry the surface in source, such as ones migrated from the older layout, match either way."""
     if not path.is_file():
         if strict:
             raise FileNotFoundError(path)
         return []
+    sources = tuple(sorted(HUMAN_HERMES_SOURCES))
+    placeholders = ",".join("?" for _ in sources)
     try:
         conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
-        placeholders = ",".join("?" for _ in HUMAN_HERMES_SOURCES)
-        rows = conn.execute(
-            """
-            SELECT
-                s.id,
-                s.source,
-                COALESCE(s.title, ''),
-                COALESCE(s.cwd, ''),
-                s.started_at,
-                COALESCE(MAX(m.timestamp), s.ended_at, s.started_at),
-                COALESCE(MAX(m.id), 0),
-                COUNT(m.id)
-            FROM sessions s
-            JOIN messages m ON m.session_id = s.id
-            WHERE s.source IN (%s)
-              AND m.role IN ('user', 'assistant')
-            GROUP BY s.id
-            """
-            % placeholders,
-            tuple(sorted(HUMAN_HERMES_SOURCES)),
-        ).fetchall()
-        conn.close()
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "created_source" in columns:
+                surface = "COALESCE(NULLIF(s.created_source, ''), s.source)"
+                where = "(s.source IN (%s) OR (s.source = 'local' AND s.created_source IN (%s)))" % (
+                    placeholders,
+                    placeholders,
+                )
+                params = sources + sources
+            else:
+                surface = "s.source"
+                where = "s.source IN (%s)" % placeholders
+                params = sources
+            rows = conn.execute(
+                """
+                SELECT
+                    s.id,
+                    %s,
+                    COALESCE(s.title, ''),
+                    COALESCE(s.cwd, ''),
+                    s.started_at,
+                    COALESCE(MAX(m.timestamp), s.ended_at, s.started_at),
+                    COALESCE(MAX(m.id), 0),
+                    COUNT(m.id)
+                FROM sessions s
+                JOIN messages m ON m.session_id = s.id
+                WHERE %s
+                  AND m.role IN ('user', 'assistant')
+                GROUP BY s.id
+                """
+                % (surface, where),
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
     except sqlite3.Error:
         if strict:
             raise

@@ -6,64 +6,15 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from . import _vendor  # noqa: F401  (vendor/ on sys.path)
-import session_adapters
+from .fuse import clock_time  # stored seconds as local clock time, so the reader never converts by hand
 import session_continuity
-from session_adapters import SessionDescriptor, SessionRoots
+from session_adapters import SessionRoots
 
-HUMAN_SOURCES = tuple(sorted(session_adapters.HUMAN_HERMES_SOURCES))
-
-
-def discover_hermes_any(path: Path, *, strict: bool = False) -> list[SessionDescriptor]:
-    """agent-memory's Hermes discovery, plus the sessions current Hermes writes with source 'local' and the real
-    surface in created_source. Older state.db files have no created_source column and take the original query."""
-    path = Path(path)
-    if not path.is_file():
-        if strict:
-            raise FileNotFoundError(path)
-        return []
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-            marks = ",".join("?" for _ in HUMAN_SOURCES)
-            params: tuple = HUMAN_SOURCES
-            if "created_source" in columns:
-                where = f"(s.source IN ({marks}) OR (s.source = 'local' AND s.created_source IN ({marks})))"
-                params = HUMAN_SOURCES + HUMAN_SOURCES
-            else:
-                where = f"s.source IN ({marks})"
-            rows = conn.execute(
-                f"""
-                SELECT s.id, s.source, COALESCE(s.title, ''), COALESCE(s.cwd, ''), s.started_at,
-                       COALESCE(MAX(m.timestamp), s.ended_at, s.started_at), COALESCE(MAX(m.id), 0), COUNT(m.id)
-                FROM sessions s
-                JOIN messages m ON m.session_id = s.id
-                WHERE {where} AND m.role IN ('user', 'assistant')
-                GROUP BY s.id
-                """,
-                params,
-            ).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        if strict:
-            raise
-        return []
-    return [
-        SessionDescriptor(
-            harness="hermes", session_id=str(session_id), source_path=str(path),
-            fingerprint=f"{max_message_id}:{message_count}", title=title or f"{source} session", cwd=cwd or "",
-            started_at=float(started_at or 0), updated_at=float(updated_at or 0),
-        )
-        for session_id, source, title, cwd, started_at, updated_at, max_message_id, message_count in rows
-    ]
-
-
-# discover_sources() looks this name up at call time, so the index sees current Hermes too (vendor/VENDORED.md).
-session_adapters.discover_hermes = discover_hermes_any
+PERIOD_EXCERPT_CHARS = 600
 
 
 def roots_for(hermes_home: Path, *, claude: Path | None = None, codex: Path | None = None,
@@ -75,6 +26,19 @@ def roots_for(hermes_home: Path, *, claude: Path | None = None, codex: Path | No
         codex_root=codex or home / ".codex" / "sessions",
         grok_root=grok or home / ".grok" / "sessions",
     )
+
+
+def day_bounds(since: str = "", until: str = "") -> tuple[float | None, float | None]:
+    """Local YYYY-MM-DD days as (the first second of since, the first second after until), so both days are
+    included. An empty day is no bound. Raises ValueError for anything that is not such a date."""
+    return (session_continuity.day_start(since) if since else None,
+            session_continuity.day_end(until) if until else None)
+
+
+def _is_live(harness: str, session_id: str, current_session_id: str | None) -> bool:
+    if not current_session_id or harness != "hermes":
+        return False
+    return session_id == current_session_id or session_id.partition(":")[2] == current_session_id
 
 
 class History:
@@ -92,56 +56,91 @@ class History:
             self.db.parent.mkdir(parents=True, exist_ok=True)
             return session_continuity.sync_index(self.db, self.roots)
 
-    def search(self, query: str, *, limit: int = 10, current_session_id: str | None = None) -> list[Any]:
-        """Ranked session hits from the cached index (no refresh on the read path), the live session left out."""
+    def search(self, query: str, *, limit: int = 10, current_session_id: str | None = None,
+               all_terms_first: bool = False, since: float | None = None, before: float | None = None) -> list[Any]:
+        """Ranked session hits from the cached index (no refresh on the read path), the live session left out.
+        A search ranks by any word. all_terms_first, for the recall nobody asked for, keeps messages holding every
+        word and broadens only when none do. since and before keep messages inside those times."""
         if not self.enabled or not self.db.is_file() or not str(query or "").strip():
             return []
         try:
             return list(session_continuity.recall_sessions(
                 self.db, query, limit=max(1, min(int(limit), 25)), sync=False, roots=self.roots,
                 current_harness="hermes" if current_session_id else None, current_session_id=current_session_id or None,
+                all_terms_first=all_terms_first, since=since, before=before,
             ))
         except (sqlite3.Error, OSError, ValueError):
             return []
 
-    def read(self, harness: str, session_id: str, *, start: int = 0, limit: int = 40) -> dict:
-        """One session's messages as a page, for brain_get, straight from the index's two tables."""
-        if not self.db.is_file():
-            return {"error": "no session index yet"}
-        start = max(0, int(start))
-        limit = max(1, min(int(limit), 200))
+    def period(self, since: float | None, before: float | None, *, limit: int = 10,
+               current_session_id: str | None = None) -> list[Any]:
+        """The sessions with a message inside the times, newest first, each with its first message there as the
+        excerpt. For a dated question whose words match nothing ("what did we talk about yesterday?")."""
+        if not self.enabled or not self.db.is_file() or (since is None and before is None):
+            return []
+        where, params = ["m.timestamp > 0"], []
+        if since is not None:
+            where.append("m.timestamp >= ?")
+            params.append(since)
+        if before is not None:
+            where.append("m.timestamp < ?")
+            params.append(before)
+        limit = max(1, min(int(limit), 25))
         try:
             conn = session_continuity.connect_readonly(self.db)
-        except Exception as exc:
-            return {"error": f"the session index could not be opened: {type(exc).__name__}"}
+        except Exception:
+            return []
         try:
-            row = conn.execute(
-                "SELECT title, cwd, started_at, updated_at FROM session_sources WHERE harness = ? AND session_id = ?",
-                (harness, session_id)).fetchone()
-            if row is None:
-                return {"error": f"no session {harness}:{session_id} in the index"}
-            total = conn.execute(
-                "SELECT count(*) FROM session_messages WHERE harness = ? AND session_id = ?",
-                (harness, session_id)).fetchone()[0]
             rows = conn.execute(
-                "SELECT role, content, timestamp FROM session_messages WHERE harness = ? AND session_id = ? "
-                "ORDER BY timestamp, id LIMIT ? OFFSET ?", (harness, session_id, limit, start)).fetchall()
-        except sqlite3.Error as exc:
-            return {"error": f"session could not be read: {type(exc).__name__}"}
+                "SELECT s.harness, s.session_id, s.title, s.cwd, s.started_at, MAX(m.timestamp), MIN(m.id) "
+                "FROM session_messages m JOIN session_sources s ON s.harness = m.harness AND s.session_id = m.session_id "
+                "WHERE " + " AND ".join(where) + " GROUP BY s.harness, s.session_id ORDER BY MAX(m.timestamp) DESC LIMIT ?",
+                (*params, limit + 1)).fetchall()
+            hits = []
+            for harness, session_id, title, cwd, started_at, last_at, first_id in rows:
+                if _is_live(harness, session_id, current_session_id):
+                    continue
+                role, text, at = conn.execute(
+                    "SELECT role, content, timestamp FROM session_messages WHERE id = ?", (first_id,)).fetchone()
+                position = conn.execute(
+                    "SELECT COUNT(*) + 1 FROM session_messages WHERE harness = ? AND session_id = ? AND id < ?",
+                    (harness, session_id, first_id)).fetchone()[0]
+                hits.append(SimpleNamespace(
+                    harness=harness, session_id=session_id, title=title or "", cwd=cwd or "",
+                    started_at=float(started_at or 0), updated_at=float(last_at or 0),
+                    messages=(SimpleNamespace(role=role, text=str(text or "")[:PERIOD_EXCERPT_CHARS],
+                                              timestamp=float(at or 0), position=int(position)),),
+                ))
+            return hits[:limit]
+        except sqlite3.Error:
+            return []
         finally:
             conn.close()
-        shown = start + len(rows)
+
+    def read(self, harness: str, session_id: str, *, start: int = 0, limit: int = 40) -> dict:
+        """One session's messages as a page, for brain_get. start counts messages already passed (0 is the first)."""
+        if not self.db.is_file():
+            return {"error": "no session index yet"}
+        try:
+            page = session_continuity.read_session(self.db, session_id, harness=harness,
+                                                   start=max(0, int(start)) + 1, limit=max(1, min(int(limit), 200)))
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return {"error": f"session could not be read: {type(exc).__name__}"}
+        if page is None:
+            return {"error": f"no session {harness}:{session_id} in the index"}
+        session = page.session
         return {
             "side": "history",
-            "id": f"{harness}:{session_id}",
-            "harness": harness,
-            "title": row[0],
-            "cwd": row[1],
-            "started_at": row[2],
-            "updated_at": row[3],
-            "message_count": total,
-            "messages": [{"role": role, "at": at, "text": text} for role, text, at in rows],
-            "next_start": shown if shown < total else None,
+            "id": f"{session.harness}:{session.session_id}",
+            "harness": session.harness,
+            "title": session.title,
+            "cwd": session.cwd,
+            "started_at": clock_time(session.started_at),
+            "updated_at": clock_time(session.updated_at),
+            "message_count": session.message_count,
+            "messages": [{"n": message.position, "role": message.role, "at": clock_time(message.timestamp),
+                          "text": message.text} for message in page.messages],
+            "next_start": page.next_start - 1 if page.next_start else None,
         }
 
     def counts(self) -> dict[str, int]:

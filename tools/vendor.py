@@ -9,8 +9,7 @@ reads, init, applier, config, store, migrate, evidence_gate, schemas, ingress, v
 agent-memory's session index), their licence files and the Example Co demo data, then writes
 vendor/VENDORED.md with every file's SHA-256 so a reviewer can check the copy against upstream.
 
-Nothing is modified. The one runtime adjustment (history.py replaces session_adapters.discover_hermes so
-sessions written by current Hermes as source 'local' are found) is documented in VENDORED.md, not patched in.
+Nothing is modified, and the plugin replaces nothing in these modules at run time.
 """
 from __future__ import annotations
 
@@ -97,10 +96,6 @@ def main() -> int:
         "  and `examples/demo/` as `demo/`).",
         f"- agent-memory: {mem_url} at {mem_sha} (`session_continuity.py`, `session_adapters.py`,",
         "  `db_permissions.py`, `ingest.py`, plus LICENSE and NOTICE).",
-        "",
-        "Runtime adjustment, in this plugin's `history.py` and not in these files: `session_adapters.discover_hermes`",
-        "is replaced by a version that also finds sessions current Hermes writes with `source = 'local'` and the",
-        "surface in `created_source`. The same change is proposed upstream.",
         "",
         "| file | sha256 |",
         "|---|---|",

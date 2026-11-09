@@ -68,7 +68,8 @@ def home(tmp_path, monkeypatch):
 @pytest.fixture
 def make_state_db():
     """Writes a Hermes state.db with the two tables the index reads. current_schema adds created_source and writes
-    source='local' rows the way current Hermes does; otherwise the older layout with the surface in source."""
+    source='local' rows the way current Hermes does; otherwise the older layout with the surface in source. A session
+    may give its own 'started' time (seconds); its messages follow a minute apart."""
     def make(path: Path, *, current_schema: bool, sessions: list[dict]) -> None:
         conn = sqlite3.connect(path)
         created = ", created_source TEXT" if current_schema else ""
@@ -81,7 +82,7 @@ def make_state_db():
         now = time.time()
         for n, session in enumerate(sessions):
             surface = session.get("surface", "cli")
-            started = now - 3600 * (n + 1)
+            started = session.get("started", now - 3600 * (n + 1))
             if current_schema:
                 conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
                              (session["id"], "local", surface, session.get("title", ""), session.get("cwd", ""),

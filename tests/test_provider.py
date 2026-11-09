@@ -71,6 +71,10 @@ def test_remember_is_gated_then_searchable(provider):
     assert found["truth_hits"] >= 1 and found["hits"][0]["id"] == record_id and found["hits"][0]["side"] == "truth"
     block = provider.prefetch("when is the widget launch?")
     assert record_id in block and provider.recall_status().count >= 1
+    # dates keep the brain's rows dated inside them
+    today = found["hits"][0]["date"]
+    assert call(provider, "brain_search", query="widget launch March", since=today)["truth_hits"] >= 1
+    assert call(provider, "brain_search", query="widget launch March", until="2000-01-01")["truth_hits"] == 0
     # remembering the same thing again is idempotent (same ids, same receipt)
     again = call(provider, "brain_remember", fact="The widget launch is in March. Sam's team owns the rollout.",
                  quote="moved the widget launch to March, and Sam's team owns the rollout",
@@ -120,6 +124,61 @@ def test_history_indexes_both_hermes_schemas(provider, home, make_state_db, curr
     assert merged["history_hits"] == 1
     block = provider.prefetch("how did the kestrel rollout go?")
     assert "hermes:old-1" in block
+
+
+def test_search_ranks_by_any_word_and_recall_keeps_every_word_first(provider, home, make_state_db):
+    make_state_db(home / "state.db", current_schema=True, sessions=[
+        {"id": "long-note", "title": "Handover",
+         "messages": [("user", "Handover note: osprey ledger migration status, plus the rota and the lunch order"),
+                      ("assistant", "Noted.")]},
+        {"id": "short-answer", "title": "Ledger",
+         "messages": [("user", "The osprey ledger moved to the shared drive."), ("assistant", "Good.")]},
+    ])
+    provider._history.refresh()
+    found = call(provider, "brain_search", query="osprey ledger migration", side="history")
+    assert {hit["id"] for hit in found["hits"]} == {"hermes:long-note", "hermes:short-answer"}
+    assert found["hits"][0]["id"] == "hermes:long-note"
+    # The per-turn recall keeps messages holding every word of the message when one does.
+    block = provider.prefetch("osprey ledger migration status")
+    assert "hermes:long-note" in block and "hermes:short-answer" not in block
+
+
+def test_search_by_date_and_the_period_listing(provider, home, make_state_db):
+    from datetime import datetime
+
+    make_state_db(home / "state.db", current_schema=True, sessions=[
+        {"id": "march-10", "title": "Budget", "started": datetime(2026, 3, 10, 12, 0).timestamp(),
+         "messages": [("user", "heron budget agreed at forty"), ("assistant", "Forty it is.")]},
+        {"id": "march-12", "title": "Budget again", "started": datetime(2026, 3, 12, 12, 0).timestamp(),
+         "messages": [("user", "good morning"), ("assistant", "Morning."),
+                      ("user", "heron budget raised to fifty"), ("assistant", "Fifty it is.")]},
+    ])
+    provider._history.refresh()
+
+    def ids(**args):
+        return [hit["id"] for hit in call(provider, "brain_search", side="history", **args)["hits"]]
+
+    assert sorted(ids(query="heron budget")) == ["hermes:march-10", "hermes:march-12"]
+    assert ids(query="heron budget", since="2026-03-11") == ["hermes:march-12"]
+    assert ids(query="heron budget", until="2026-03-10") == ["hermes:march-10"]
+    assert ids(query="heron budget", since="2026-03-13") == []
+
+    # Words that match nothing in the period give the period's sessions, and so does no query at all.
+    listed = call(provider, "brain_search", query="what did we talk about", side="history",
+                  since="2026-03-12", until="2026-03-12")
+    assert [hit["id"] for hit in listed["hits"]] == ["hermes:march-12"] and "newest first" in listed["note"]
+    assert ids(since="2026-03-10", until="2026-03-12") == ["hermes:march-12", "hermes:march-10"]
+    assert "error" in call(provider, "brain_search", query="heron", since="March")
+    assert "error" in call(provider, "brain_search")
+
+    # A hit says where to open its session: two messages before the excerpt.
+    hit = call(provider, "brain_search", query="heron budget raised", side="history", since="2026-03-12")["hits"][0]
+    assert hit["open_at"] == 0 and hit["excerpt_at"] == "2026-03-12 12:02"
+    page = call(provider, "brain_get", id=hit["id"], offset=2)
+    assert [(m["n"], m["text"]) for m in page["messages"]] == [(3, "heron budget raised to fifty"), (4, "Fifty it is.")]
+    assert page["message_count"] == 4 and page["next_start"] is None
+    # times read as local clock time, not seconds
+    assert page["started_at"] == "2026-03-12 12:00" and page["messages"][0]["at"] == "2026-03-12 12:02"
 
 
 def test_demo_brain_has_a_disputed_fact(plugin_module, plugin_dir, tmp_path):

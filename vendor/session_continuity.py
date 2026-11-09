@@ -11,7 +11,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ingest import has_secret
@@ -37,6 +37,8 @@ USAGE_LOG_PATH = Path(
 )
 MAX_MESSAGE_CHARS = 32_000
 MAX_EXCERPTS_PER_SESSION = 3
+MAX_READ_MESSAGES = 200
+MAX_READ_CHARS = 40_000
 INDEX_FORMAT_VERSION = "session-v2"
 SESSION_SECRET_ASSIGNMENT = re.compile(
     r"(?:^|\s)(?:export\s+)?"
@@ -51,6 +53,7 @@ class SessionExcerpt:
     role: str
     timestamp: float
     text: str
+    position: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,13 @@ class SessionSummary:
     updated_at: float
     source_path: str
     message_count: int
+
+
+@dataclass(frozen=True)
+class SessionPage:
+    session: SessionSummary
+    messages: tuple[SessionExcerpt, ...]
+    next_start: int | None
 
 
 @dataclass(frozen=True)
@@ -347,6 +357,16 @@ def fts_terms(query: str) -> list[str]:
     return terms[:20]
 
 
+def day_start(value: str) -> float:
+    """Local midnight at the start of a YYYY-MM-DD day."""
+    return datetime.strptime(value, "%Y-%m-%d").timestamp()
+
+
+def day_end(value: str) -> float:
+    """Local midnight at the end of a YYYY-MM-DD day, so the day is included."""
+    return (datetime.strptime(value, "%Y-%m-%d") + timedelta(days=1)).timestamp()
+
+
 def _query_rows(
     conn: sqlite3.Connection,
     expression: str,
@@ -354,6 +374,8 @@ def _query_rows(
     harness: str | None,
     current_harness: str | None,
     current_session_id: str | None,
+    since: float | None = None,
+    before: float | None = None,
 ):
     sql = """
         SELECT
@@ -374,7 +396,8 @@ def _query_rows(
                 '',
                 ' ... ',
                 40
-            ) AS excerpt
+            ) AS excerpt,
+            m.id
         FROM session_messages_fts
         JOIN session_messages m ON m.id = session_messages_fts.rowid
         JOIN session_sources s
@@ -389,6 +412,15 @@ def _query_rows(
     if current_harness and current_session_id:
         sql += " AND NOT (m.harness = ? AND (m.session_id = ? OR substr(m.session_id,instr(m.session_id,':')+1)=?))"
         params.extend([current_harness, current_session_id, current_session_id])
+    if since is not None or before is not None:
+        # A date filter can't place a message with no timestamp, so leave it out.
+        sql += " AND m.timestamp > 0"
+    if since is not None:
+        sql += " AND m.timestamp >= ?"
+        params.append(since)
+    if before is not None:
+        sql += " AND m.timestamp < ?"
+        params.append(before)
     sql += " ORDER BY bm25(session_messages_fts), m.timestamp DESC LIMIT ?"
     params.append(fetch)
     return conn.execute(sql, params).fetchall()
@@ -404,6 +436,9 @@ def recall_sessions(
     current_session_id: str | None = None,
     sync: bool = True,
     roots: SessionRoots | None = None,
+    all_terms_first: bool = False,
+    since: float | None = None,
+    before: float | None = None,
 ) -> list[SessionHit]:
     db_path = Path(db_path)
     source_errors = ()
@@ -423,28 +458,35 @@ def recall_sessions(
 
     conn = connect_readonly(db_path)
     fetch = max(limit * 12, 24)
-    and_expression = " ".join('"%s"' % term.replace('"', '""') for term in terms)
-    rows = _query_rows(
-        conn,
-        and_expression,
-        fetch,
-        harness,
-        current_harness,
-        current_session_id,
-    )
-    if not rows and len(terms) > 1:
-        or_expression = " OR ".join(
-            '"%s"' % term.replace('"', '""') for term in terms
-        )
+    quoted = ['"%s"' % term.replace('"', '""') for term in terms]
+    rows = []
+    if all_terms_first:
+        # The auto-recall hook injects context nobody asked for, so it keeps
+        # messages holding every prompt word and broadens only when none do.
         rows = _query_rows(
             conn,
-            or_expression,
+            " ".join(quoted),
             fetch,
             harness,
             current_harness,
             current_session_id,
+            since,
+            before,
         )
-    conn.close()
+    if not all_terms_first or (not rows and len(terms) > 1):
+        # A search matches any term, and bm25 puts messages holding more and
+        # rarer terms first. Requiring every term first dropped a message that
+        # missed one word whenever a long message held them all.
+        rows = _query_rows(
+            conn,
+            " OR ".join(quoted),
+            fetch,
+            harness,
+            current_harness,
+            current_session_id,
+            since,
+            before,
+        )
 
     grouped = {}
     for row in rows:
@@ -465,8 +507,10 @@ def recall_sessions(
                     role=row[7],
                     timestamp=float(row[8] or 0),
                     text=excerpt[:600],
+                    position=_message_position(conn, row[0], row[1], row[11]),
                 )
             )
+    conn.close()
 
     hits = []
     for group in grouped.values():
@@ -504,6 +548,101 @@ def recall_sessions(
         seen_excerpts.add(excerpt_key)
         distinct_hits.append(hit)
     return distinct_hits[: max(1, limit)]
+
+
+def _message_position(
+    conn: sqlite3.Connection,
+    harness: str,
+    session_id: str,
+    message_id: int,
+) -> int:
+    # Messages are stored in transcript order, so the row id gives the order.
+    return conn.execute(
+        "SELECT COUNT(*) + 1 FROM session_messages "
+        "WHERE harness = ? AND session_id = ? AND id < ?",
+        (harness, session_id, message_id),
+    ).fetchone()[0]
+
+
+def read_session(
+    db_path: Path | str,
+    session_id: str,
+    *,
+    harness: str | None = None,
+    start: int = 1,
+    limit: int = 40,
+    max_chars: int = MAX_READ_CHARS,
+) -> SessionPage | None:
+    """Return a session's indexed dialogue in order, one page at a time."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return None
+    start = max(1, start)
+    limit = min(max(1, limit), MAX_READ_MESSAGES)
+    conn = connect_readonly(db_path)
+    sql = """
+        SELECT harness, session_id, title, cwd, started_at, updated_at, source_path
+        FROM session_sources
+        WHERE session_id = ?
+    """
+    params: list[object] = [session_id]
+    if harness:
+        sql += " AND harness = ?"
+        params.append(harness)
+    sources = conn.execute(sql + " ORDER BY harness", params).fetchall()
+    if len(sources) > 1:
+        conn.close()
+        raise ValueError(
+            "session %s is in more than one harness (%s), pass a harness"
+            % (session_id, ", ".join(row[0] for row in sources))
+        )
+    if not sources:
+        conn.close()
+        return None
+    source = sources[0]
+    total = conn.execute(
+        "SELECT COUNT(*) FROM session_messages WHERE harness = ? AND session_id = ?",
+        (source[0], source[1]),
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT role, timestamp, content FROM session_messages "
+        "WHERE harness = ? AND session_id = ? ORDER BY id LIMIT ? OFFSET ?",
+        (source[0], source[1], limit, start - 1),
+    ).fetchall()
+    conn.close()
+
+    messages = []
+    used = 0
+    for offset, row in enumerate(rows):
+        text = str(row[2])
+        if messages and used + len(text) > max_chars:
+            break
+        if len(text) > max_chars:
+            text = text[:max_chars] + " ... [message cut at %d characters]" % max_chars
+        used += len(text)
+        messages.append(
+            SessionExcerpt(
+                role=row[0],
+                timestamp=float(row[1] or 0),
+                text=text,
+                position=start + offset,
+            )
+        )
+    next_position = start + len(messages)
+    return SessionPage(
+        session=SessionSummary(
+            harness=source[0],
+            session_id=source[1],
+            title=source[2],
+            cwd=source[3],
+            started_at=float(source[4] or 0),
+            updated_at=float(source[5] or 0),
+            source_path=source[6],
+            message_count=int(total),
+        ),
+        messages=tuple(messages),
+        next_start=next_position if next_position <= total else None,
+    )
 
 
 def list_sessions(
@@ -592,8 +731,38 @@ def print_hits(query: str, hits: list[SessionHit]) -> None:
         if hit.cwd:
             print("   cwd: %s" % hit.cwd)
         for excerpt in hit.messages:
-            print("   %s: %s" % (excerpt.role, excerpt.text))
+            print("   #%d %s: %s" % (excerpt.position, excerpt.role, excerpt.text))
         print("")
+
+
+def print_session(page: SessionPage) -> None:
+    session = page.session
+    print(
+        "[%s] %s  %s"
+        % (session.harness, session.title, format_time(session.updated_at))
+    )
+    print("   session: %s" % session.session_id)
+    print("   source: %s" % session.source_path)
+    if session.cwd:
+        print("   cwd: %s" % session.cwd)
+    if not page.messages:
+        print("   no messages there, the session has %d" % session.message_count)
+        return
+    print(
+        "   messages #%d to #%d of %d"
+        % (
+            page.messages[0].position,
+            page.messages[-1].position,
+            session.message_count,
+        )
+    )
+    for message in page.messages:
+        print("")
+        print("#%d %s  %s" % (message.position, message.role, format_time(message.timestamp)))
+        print(message.text)
+    if page.next_start:
+        print("")
+        print("more: start from #%d" % page.next_start)
 
 
 def log_usage(query: str, hits: list[SessionHit]) -> None:
@@ -614,6 +783,18 @@ def log_usage(query: str, hits: list[SessionHit]) -> None:
         pass
 
 
+def _date_argument(parse):
+    def check(value: str) -> float:
+        try:
+            return parse(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                "use a YYYY-MM-DD date, not %r" % value
+            ) from None
+
+    return check
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="session-memory")
     parser.add_argument(
@@ -632,6 +813,18 @@ def build_parser() -> argparse.ArgumentParser:
     recall_parser.add_argument("--current-harness")
     recall_parser.add_argument("--current-session-id")
     recall_parser.add_argument("--no-sync", action="store_true")
+    recall_parser.add_argument(
+        "--since", type=_date_argument(day_start), metavar="YYYY-MM-DD"
+    )
+    recall_parser.add_argument(
+        "--until", type=_date_argument(day_end), metavar="YYYY-MM-DD"
+    )
+
+    read_parser = subparsers.add_parser("read")
+    read_parser.add_argument("session_id")
+    read_parser.add_argument("--harness")
+    read_parser.add_argument("--start", type=int, default=1)
+    read_parser.add_argument("-n", type=int, default=40)
 
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("-n", type=int, default=20)
@@ -666,9 +859,28 @@ def main(argv: list[str] | None = None) -> int:
             current_harness=args.current_harness,
             current_session_id=args.current_session_id,
             sync=not args.no_sync,
+            since=args.since,
+            before=args.until,
         )
         print_hits(args.query, hits)
         log_usage(args.query, hits)
+        return 0
+    if args.command == "read":
+        try:
+            page = read_session(
+                db_path,
+                args.session_id,
+                harness=args.harness,
+                start=args.start,
+                limit=args.n,
+            )
+        except ValueError as exc:
+            print("error: %s" % exc, file=sys.stderr)
+            return 1
+        if page is None:
+            print("error: no indexed session %s" % args.session_id, file=sys.stderr)
+            return 1
+        print_session(page)
         return 0
     if args.command == "list":
         sessions = list_sessions(

@@ -4,12 +4,8 @@ Copied byte for byte by `tools/vendor.py`. Nothing here is edited; a change belo
 
 - agent-si: https://github.com/joelbrilliant/agent-si at fe4657e1378dbbd4334fa9d99885b1263241849e (`src/brain/`, the modules the plugin imports, plus LICENSE and NOTICE,
   and `examples/demo/` as `demo/`).
-- agent-memory: https://github.com/joelbrilliant/agent-memory at 26ebe0f91dbcd58ec74676069fb9f8470c60a622 (`session_continuity.py`, `session_adapters.py`,
+- agent-memory: https://github.com/joelbrilliant/agent-memory at 8ddd122fe57ee5f80f4970be14e395922b1bd5c3 (`session_continuity.py`, `session_adapters.py`,
   `db_permissions.py`, `ingest.py`, plus LICENSE and NOTICE).
-
-Runtime adjustment, in this plugin's `history.py` and not in these files: `session_adapters.discover_hermes`
-is replaced by a version that also finds sessions current Hermes writes with `source = 'local'` and the
-surface in `created_source`. The same change is proposed upstream.
 
 | file | sha256 |
 |---|---|
@@ -61,8 +57,8 @@ surface in `created_source`. The same change is proposed upstream.
 | vendor/LICENSE-agent-memory | 517dea67b88518fbe5bcaeff69711720730aa6e32b5879e3ea5e62c644f1947b |
 | vendor/NOTICE-agent-si | 57376aaa63e362dfcaa17f49c2cc17ecb542d466e712168470eb3041c18518a8 |
 | vendor/NOTICE-agent-memory | 70a048e5448c73f48ba21bfc2ff5ca7427c7eb9d7fd598cf37cf5f2769be256a |
-| vendor/session_continuity.py | 527b8f3da6834b9a7d6548260ea433f8cbcd26353b8aa9c94f9d80c38a3343fb |
-| vendor/session_adapters.py | ae55ebf64420d4b65f6cf662f9ea20a0782bbfa45a16622c846c0e38d2b4cbb0 |
+| vendor/session_continuity.py | b83e2ac2a0e504b2638bfc1c4c174d7ba3feb6c1a1bb88ed132e0b2778f9eab4 |
+| vendor/session_adapters.py | 2d54ed9e0f75e6f06846e5f91b991f841f1230037d9e98b37728ee7df26e790d |
 | vendor/db_permissions.py | 64f005f7beb10c5a09e930ec39a50705646dffc1364cce8d8edd106d939c40cb |
 | vendor/ingest.py | 5cbc5fc7be73f94f2a9378f8b6112bbdc2163f8255840a02cd82a221a77c7a9d |
 | demo/demo.toml | 3bc0a4e785dea8cdf79513bc658e949ea3a4fddde7034d3db2dfcc56abe07d33 |

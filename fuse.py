@@ -9,6 +9,7 @@ from typing import Any
 RRF_K = 60
 SNIPPET_CHARS = 200
 EXCERPT_CHARS = 240
+CONTEXT_BEFORE = 2
 
 
 def rrf(ranked_lists: list[list[str]], k: int = RRF_K) -> list[tuple[str, float]]:
@@ -32,6 +33,14 @@ def _day(timestamp: float) -> str:
         return ""
 
 
+def clock_time(timestamp: float) -> str:
+    """Local 'YYYY-MM-DD HH:MM', or '' when the time is unknown."""
+    try:
+        return datetime.fromtimestamp(float(timestamp)).strftime("%Y-%m-%d %H:%M") if float(timestamp or 0) > 0 else ""
+    except (OSError, OverflowError, ValueError, TypeError):
+        return ""
+
+
 def truth_item(hit: dict, rank: int) -> dict[str, Any]:
     """One hit of the engine's search tool, as the merged list carries it."""
     return {
@@ -50,7 +59,7 @@ def history_item(hit: Any, rank: int) -> dict[str, Any]:
     """One SessionHit of the session index, as the merged list carries it."""
     excerpts = list(getattr(hit, "messages", ()) or ())
     first = excerpts[0] if excerpts else None
-    return {
+    item = {
         "side": "history",
         "id": f"{hit.harness}:{hit.session_id}",
         "harness": hit.harness,
@@ -59,8 +68,14 @@ def history_item(hit: Any, rank: int) -> dict[str, Any]:
         "date": _day(getattr(hit, "updated_at", 0) or getattr(hit, "started_at", 0)),
         "excerpt": _clean(first.text, EXCERPT_CHARS) if first is not None else "",
         "excerpt_role": first.role if first is not None else "",
+        "excerpt_at": clock_time(getattr(first, "timestamp", 0)) if first is not None else "",
         "rank_history": rank,
     }
+    position = int(getattr(first, "position", 0) or 0)
+    if position:
+        # brain_get's offset that opens the session a few messages before the excerpt.
+        item["open_at"] = max(0, position - 1 - CONTEXT_BEFORE)
+    return item
 
 
 def merge(truth: list[dict], history: list[Any], limit: int) -> list[dict[str, Any]]:
