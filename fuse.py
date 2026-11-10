@@ -1,15 +1,14 @@
-"""Merge the truth side (the brain's keyword search) and the history side (past agent sessions) into one list, by
-reciprocal rank fusion, and format the result for a tool answer or the per-turn recall block. No model anywhere."""
+"""The per-turn recall block: the brain's best hits and the best past sessions for the user's message, taken in turn
+by rank (reciprocal rank fusion) and written as a few lines. No model anywhere. A search the model asks for is not
+merged here: brain_search gives the brain's hits and the sessions as the engine's own search does."""
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import Any
 
 RRF_K = 60
 SNIPPET_CHARS = 200
 EXCERPT_CHARS = 240
-CONTEXT_BEFORE = 2
 
 
 def rrf(ranked_lists: list[list[str]], k: int = RRF_K) -> list[tuple[str, float]]:
@@ -26,21 +25,6 @@ def _clean(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def _day(timestamp: float) -> str:
-    try:
-        return datetime.fromtimestamp(float(timestamp)).astimezone().strftime("%Y-%m-%d")
-    except (OSError, OverflowError, ValueError, TypeError):
-        return ""
-
-
-def clock_time(timestamp: float) -> str:
-    """Local 'YYYY-MM-DD HH:MM', or '' when the time is unknown."""
-    try:
-        return datetime.fromtimestamp(float(timestamp)).strftime("%Y-%m-%d %H:%M") if float(timestamp or 0) > 0 else ""
-    except (OSError, OverflowError, ValueError, TypeError):
-        return ""
-
-
 def truth_item(hit: dict, rank: int) -> dict[str, Any]:
     """One hit of the engine's search tool, as the merged list carries it."""
     return {
@@ -55,31 +39,25 @@ def truth_item(hit: dict, rank: int) -> dict[str, Any]:
     }
 
 
-def history_item(hit: Any, rank: int) -> dict[str, Any]:
-    """One SessionHit of the session index, as the merged list carries it."""
-    excerpts = list(getattr(hit, "messages", ()) or ())
-    first = excerpts[0] if excerpts else None
-    item = {
+def history_item(session: dict, rank: int) -> dict[str, Any]:
+    """One past session, in the shape the engine's search gives it (history.item), as the merged list carries it.
+    The id ends in the excerpt's message number, so brain_get opens the session at that line."""
+    excerpts = session.get("excerpts") or []
+    first = excerpts[0] if excerpts else {}
+    return {
         "side": "history",
-        "id": f"{hit.harness}:{hit.session_id}",
-        "harness": hit.harness,
-        "session_id": hit.session_id,
-        "title": _clean(hit.title, 80),
-        "date": _day(getattr(hit, "updated_at", 0) or getattr(hit, "started_at", 0)),
-        "excerpt": _clean(first.text, EXCERPT_CHARS) if first is not None else "",
-        "excerpt_role": first.role if first is not None else "",
-        "excerpt_at": clock_time(getattr(first, "timestamp", 0)) if first is not None else "",
+        "id": session.get("id", ""),
+        "title": _clean(session.get("title", ""), 80),
+        "date": session.get("date") or "",
+        "excerpt": _clean(first.get("text", ""), EXCERPT_CHARS),
+        "excerpt_role": first.get("role", ""),
+        "excerpt_at": first.get("at", ""),
         "rank_history": rank,
     }
-    position = int(getattr(first, "position", 0) or 0)
-    if position:
-        # brain_get's offset that opens the session a few messages before the excerpt.
-        item["open_at"] = max(0, position - 1 - CONTEXT_BEFORE)
-    return item
 
 
-def merge(truth: list[dict], history: list[Any], limit: int) -> list[dict[str, Any]]:
-    """Fuse the two ranked lists. A key is 'truth:<entity>:<id>' or 'history:<harness>:<session_id>'."""
+def merge(truth: list[dict], history: list[dict], limit: int) -> list[dict[str, Any]]:
+    """Fuse the two ranked lists. A key is 'truth:<entity>:<id>' or 'history:<session id>'."""
     items: dict[str, dict[str, Any]] = {}
     truth_keys: list[str] = []
     for rank, hit in enumerate(truth, start=1):
@@ -88,10 +66,10 @@ def merge(truth: list[dict], history: list[Any], limit: int) -> list[dict[str, A
             items[key] = truth_item(hit, rank)
             truth_keys.append(key)
     history_keys: list[str] = []
-    for rank, hit in enumerate(history, start=1):
-        key = f"history:{hit.harness}:{hit.session_id}"
+    for rank, session in enumerate(history, start=1):
+        key = "history:" + str(session.get("id", "")).partition("#")[0]
         if key not in items:
-            items[key] = history_item(hit, rank)
+            items[key] = history_item(session, rank)
             history_keys.append(key)
     merged = []
     for key, score in rrf([truth_keys, history_keys])[:limit]:

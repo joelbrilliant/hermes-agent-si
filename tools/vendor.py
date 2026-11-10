@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Vendor the engine and the session index this plugin runs on, byte for byte, from pinned checkouts.
+"""Vendor the engine this plugin runs on, byte for byte, from a pinned checkout.
 
-    python3 tools/vendor.py --agent-si PATH --agent-memory PATH
+    python3 tools/vendor.py --agent-si PATH
 
-PATH is a checkout of joelbrilliant/agent-si at the tag to pin and of joelbrilliant/agent-memory at the
-commit to pin. The script copies the modules the plugin imports (the import closure of the engine's
-reads, init, applier, config, store, migrate, evidence_gate, schemas, ingress, validate and collect, and
-agent-memory's session index), their licence files and the Example Co demo data, then writes
-vendor/VENDORED.md with every file's SHA-256 so a reviewer can check the copy against upstream.
+PATH is a checkout of joelbrilliant/agent-si at the tag to pin. The script copies the modules the plugin imports
+(the import closure of the engine's reads, init, applier, config, store, migrate, evidence_gate, schemas, ingress,
+validate, collect and sessions), its licence files and the Example Co demo data, then writes vendor/VENDORED.md
+with every file's SHA-256 so a reviewer can check the copy against upstream.
 
 Nothing is modified, and the plugin replaces nothing in these modules at run time.
 """
@@ -28,8 +27,7 @@ ENGINE_MODULES = (
     "marks", "migrate", "reads", "redact_ops", "registry", "schemas", "scope", "scrub", "store", "strict", "text",
     "truth", "units", "validate", "versions",
 )
-ENGINE_DIRS = ("collectors", "migrations", "templates")
-MEMORY_MODULES = ("session_continuity.py", "session_adapters.py", "db_permissions.py", "ingest.py")
+ENGINE_DIRS = ("collectors", "migrations", "sessions", "templates")
 
 
 def sha(path: Path) -> str:
@@ -61,13 +59,12 @@ def copy_tree(src: Path, dest: Path, rows: list[tuple[str, str]]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--agent-si", required=True, type=Path)
-    ap.add_argument("--agent-memory", required=True, type=Path)
     args = ap.parse_args()
     engine_src = args.agent_si / "src" / "brain"
     if not (engine_src / "reads.py").is_file():
         raise SystemExit(f"{args.agent_si} is not an agent-si checkout (no src/brain/reads.py)")
-    if not (args.agent_memory / "session_continuity.py").is_file():
-        raise SystemExit(f"{args.agent_memory} is not an agent-memory checkout (no session_continuity.py)")
+    if not (engine_src / "sessions" / "record.py").is_file():
+        raise SystemExit(f"{args.agent_si} has no src/brain/sessions/record.py: the plugin needs agent-si 1.16.1 or newer")
 
     if VENDOR.exists():
         shutil.rmtree(VENDOR)
@@ -80,29 +77,23 @@ def main() -> int:
         copy_tree(engine_src / name, VENDOR / "brain" / name, rows)
     for name in ("LICENSE", "NOTICE"):
         copy_file(args.agent_si / name, VENDOR / f"{name}-agent-si", rows)
-        copy_file(args.agent_memory / name, VENDOR / f"{name}-agent-memory", rows)
-    for name in MEMORY_MODULES:
-        copy_file(args.agent_memory / name, VENDOR / name, rows)
     copy_tree(args.agent_si / "examples" / "demo", DEMO, rows)
 
     si_url, si_sha = describe(args.agent_si)
-    mem_url, mem_sha = describe(args.agent_memory)
     lines = [
         "# Vendored code",
         "",
         "Copied byte for byte by `tools/vendor.py`. Nothing here is edited; a change belongs upstream.",
         "",
         f"- agent-si: {si_url} at {si_sha} (`src/brain/`, the modules the plugin imports, plus LICENSE and NOTICE,",
-        "  and `examples/demo/` as `demo/`).",
-        f"- agent-memory: {mem_url} at {mem_sha} (`session_continuity.py`, `session_adapters.py`,",
-        "  `db_permissions.py`, `ingest.py`, plus LICENSE and NOTICE).",
+        "  and `examples/demo/` as `demo/`). Past sessions are recorded by the engine's own `brain.sessions`.",
         "",
         "| file | sha256 |",
         "|---|---|",
     ]
     lines += [f"| {path} | {digest} |" for path, digest in rows]
     (VENDOR / "VENDORED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"vendored {len(rows)} files; agent-si {si_sha[:12]}, agent-memory {mem_sha[:12]}")
+    print(f"vendored {len(rows)} files; agent-si {si_sha[:12]}")
     return 0
 
 

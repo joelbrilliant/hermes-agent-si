@@ -1,159 +1,175 @@
-"""The history side: agent-memory's session index (vendored) over past Hermes, Claude Code, Codex and Grok sessions
-on this machine. One SQLite file under the plugin's data folder, refreshed in the background after each turn,
-searched with FTS5. Messages that look like secrets are never indexed (agent-memory's own rule)."""
+"""The history side: the engine's own session record (brain.sessions, vendored). One SQLite file beside the brain
+holds what was said in past Hermes, Claude Code, Codex and Grok sessions on this machine, word for word, added by
+code and never rewritten. The plugin refreshes it in a background thread, with the sessions of the Hermes home it
+was started for, and reads it with the engine's functions in the engine's shapes, so a past session reads here as
+it does from the engine's own search. Messages that look like secrets are never recorded (the engine's rule)."""
 from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from . import _vendor  # noqa: F401  (vendor/ on sys.path)
-from .fuse import clock_time  # stored seconds as local clock time, so the reader never converts by hand
-import session_continuity
-from session_adapters import SessionRoots
+from brain.sessions import record
+from brain.sessions.adapters import SessionRoots
+from brain.text import ELLIPSIS, single_line
 
-PERIOD_EXCERPT_CHARS = 600
-
-
-def roots_for(hermes_home: Path, *, claude: Path | None = None, codex: Path | None = None,
-              grok: Path | None = None) -> SessionRoots:
-    home = Path.home()
-    return SessionRoots(
-        hermes_db=Path(hermes_home) / "state.db",
-        claude_root=claude or home / ".claude" / "projects",
-        codex_root=codex or home / ".codex" / "sessions",
-        grok_root=grok or home / ".grok" / "sessions",
-    )
+# How many sessions a search shows and how much of each, as the engine's own search does it (brain.reads, 1.16.1).
+# Beside brain hits they are leads: a few, each with one short line, because every search pays for them. When the
+# brain has no hit, or only sessions were asked for, the sessions are the answer and come deeper.
+SESSIONS_BESIDE = 3
+SESSIONS_ALONE = 5
+LEAD_EXCERPTS = 1
+LEAD_CHARS = 160
+TITLE_CHARS = 80
+PERIOD_NOTE = "No session in those dates had the words; these are that period's sessions, newest first."
 
 
-def day_bounds(since: str = "", until: str = "") -> tuple[float | None, float | None]:
-    """Local YYYY-MM-DD days as (the first second of since, the first second after until), so both days are
-    included. An empty day is no bound. Raises ValueError for anything that is not such a date."""
-    return (session_continuity.day_start(since) if since else None,
-            session_continuity.day_end(until) if until else None)
+def roots_for(hermes_home: Path, *, profiles: Mapping[str, str] | None = None, claude: Path | None = None,
+              codex: Path | None = None, grok: Path | None = None) -> SessionRoots:
+    """Where the sessions come from: the tools' default folders, Hermes sessions from the Hermes home the provider
+    was started for (whatever $HERMES_HOME says in this process), and any other Hermes profiles the brain's
+    brain.toml names under [sessions]."""
+    roots = SessionRoots.default(hermes_profiles=profiles)
+    return replace(roots, hermes_db=Path(hermes_home) / "state.db", claude_root=claude or roots.claude_root,
+                   codex_root=codex or roots.codex_root, grok_root=grok or roots.grok_root)
 
 
-def _is_live(harness: str, session_id: str, current_session_id: str | None) -> bool:
-    if not current_session_id or harness != "hermes":
+def record_path(brain_dir: Path) -> Path:
+    """The record's file: sessions.sqlite3 in the brain's own folder, where the engine keeps it."""
+    return record.path_for(brain_dir)
+
+
+def valid_days(since: str = "", until: str = "") -> bool:
+    """Whether both are empty or local days written YYYY-MM-DD."""
+    try:
+        record.day_bounds(since or None, until or None, "UTC")
+    except ValueError:
         return False
-    return session_id == current_session_id or session_id.partition(":")[2] == current_session_id
+    return True
+
+
+def item(hit: Any, zone: str) -> dict[str, Any]:
+    """One session as the engine's search shows it. The id ends in the first excerpt's message number, so opening
+    it lands on that line and not at the session's start."""
+    excerpts = []
+    for excerpt in hit.excerpts:
+        entry = {"n": excerpt.n, "role": excerpt.role, "text": excerpt.text}
+        at = record.clock(excerpt.timestamp, zone)
+        if at != record.NO_TIME:
+            entry["at"] = at
+        excerpts.append(entry)
+    place = record.place_ref(hit.harness, hit.session_id, hit.excerpts[0].n) if hit.excerpts else hit.id
+    return {
+        "id": place,
+        "title": single_line(hit.title, max_chars=TITLE_CHARS, ellipsis=ELLIPSIS),
+        "date": record.local_day(hit.updated_at, zone) or None,
+        "excerpts": excerpts,
+    }
 
 
 class History:
-    def __init__(self, db_path: Path, roots: SessionRoots, *, enabled: bool = True):
+    def __init__(self, db_path: Path, roots: SessionRoots, *, zone: str = "UTC", enabled: bool = True):
         self.db = Path(db_path)
         self.roots = roots
+        self.zone = zone
         self.enabled = enabled
         self._lock = threading.Lock()
 
-    def refresh(self) -> Any:
-        """Index new and changed sessions. Blocking; the provider calls it from a background thread."""
-        if not self.enabled:
+    @staticmethod
+    def is_session(ident: str) -> bool:
+        """Whether an id names a past session (hermes:…, claude:…, codex:…, grok:…) and not a row of the brain."""
+        return record.parse_place(ident) is not None
+
+    def refresh(self, *, wait: bool = True) -> Any:
+        """Add what the tools' session stores hold and the record lacks. Blocking; the provider calls it from a
+        background thread. With wait False, a refresh already running here is left to finish and this one does
+        nothing. Another process refreshing the same record is never waited for (the engine's own lock)."""
+        if not self.enabled or not self._lock.acquire(blocking=wait):
             return None
-        with self._lock:
+        try:
             self.db.parent.mkdir(parents=True, exist_ok=True)
-            return session_continuity.sync_index(self.db, self.roots)
+            return record.sync(self.db, self.roots)
+        finally:
+            self._lock.release()
 
-    def search(self, query: str, *, limit: int = 10, current_session_id: str | None = None,
-               all_terms_first: bool = False, since: float | None = None, before: float | None = None) -> list[Any]:
-        """Ranked session hits from the cached index (no refresh on the read path), the live session left out.
-        A search ranks by any word. all_terms_first, for the recall nobody asked for, keeps messages holding every
-        word and broadens only when none do. since and before keep messages inside those times."""
-        if not self.enabled or not self.db.is_file() or not str(query or "").strip():
-            return []
-        try:
-            return list(session_continuity.recall_sessions(
-                self.db, query, limit=max(1, min(int(limit), 25)), sync=False, roots=self.roots,
-                current_harness="hermes" if current_session_id else None, current_session_id=current_session_id or None,
-                all_terms_first=all_terms_first, since=since, before=before,
-            ))
-        except (sqlite3.Error, OSError, ValueError):
-            return []
-
-    def period(self, since: float | None, before: float | None, *, limit: int = 10,
-               current_session_id: str | None = None) -> list[Any]:
-        """The sessions with a message inside the times, newest first, each with its first message there as the
-        excerpt. For a dated question whose words match nothing ("what did we talk about yesterday?")."""
-        if not self.enabled or not self.db.is_file() or (since is None and before is None):
-            return []
-        where, params = ["m.timestamp > 0"], []
-        if since is not None:
-            where.append("m.timestamp >= ?")
-            params.append(since)
-        if before is not None:
-            where.append("m.timestamp < ?")
-            params.append(before)
+    def find(self, query: str, *, limit: int, deep: bool, since: str = "", until: str = "",
+             asking: tuple[str, str] | None = None, all_terms_first: bool = False) -> tuple[list[dict], str]:
+        """The sessions for a search, as the engine's search chooses them, and a line to pass on when the dates
+        alone chose them. A search ranks by any word; all_terms_first, for the recall nobody asked for, keeps
+        messages holding every word and widens only when none do. since and until are local YYYY-MM-DD days, both
+        included; another shape raises ValueError. asking is the live session, left out. No refresh here."""
+        first, after = record.day_bounds(since or None, until or None, self.zone)
+        if not self.enabled or not self.db.is_file():
+            return [], ""
+        excerpts = record.MAX_EXCERPTS if deep else LEAD_EXCERPTS
+        chars = record.EXCERPT_CHARS if deep else LEAD_CHARS
         limit = max(1, min(int(limit), 25))
+        worded = bool(record.fts_terms(query))
+        found: list = []
+        note = ""
         try:
-            conn = session_continuity.connect_readonly(self.db)
-        except Exception:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT s.harness, s.session_id, s.title, s.cwd, s.started_at, MAX(m.timestamp), MIN(m.id) "
-                "FROM session_messages m JOIN session_sources s ON s.harness = m.harness AND s.session_id = m.session_id "
-                "WHERE " + " AND ".join(where) + " GROUP BY s.harness, s.session_id ORDER BY MAX(m.timestamp) DESC LIMIT ?",
-                (*params, limit + 1)).fetchall()
-            hits = []
-            for harness, session_id, title, cwd, started_at, last_at, first_id in rows:
-                if _is_live(harness, session_id, current_session_id):
-                    continue
-                role, text, at = conn.execute(
-                    "SELECT role, content, timestamp FROM session_messages WHERE id = ?", (first_id,)).fetchone()
-                position = conn.execute(
-                    "SELECT COUNT(*) + 1 FROM session_messages WHERE harness = ? AND session_id = ? AND id < ?",
-                    (harness, session_id, first_id)).fetchone()[0]
-                hits.append(SimpleNamespace(
-                    harness=harness, session_id=session_id, title=title or "", cwd=cwd or "",
-                    started_at=float(started_at or 0), updated_at=float(last_at or 0),
-                    messages=(SimpleNamespace(role=role, text=str(text or "")[:PERIOD_EXCERPT_CHARS],
-                                              timestamp=float(at or 0), position=int(position)),),
-                ))
-            return hits[:limit]
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
+            if worded:
+                found = record.search(self.db, query, limit=limit, excerpts=excerpts, excerpt_chars=chars,
+                                      exclude=asking, since=first, before=after, all_terms_first=all_terms_first)
+            if not found and (since or until):
+                found = record.period(self.db, first, after, limit=limit, exclude=asking, excerpt_chars=chars)
+                if found and worded:
+                    note = PERIOD_NOTE
+        except (sqlite3.Error, OSError):
+            return [], "The session record couldn't be read; past sessions are left out of this answer."
+        return [item(hit, self.zone) for hit in found], note
 
-    def read(self, harness: str, session_id: str, *, start: int = 0, limit: int = 40) -> dict:
-        """One session's messages as a page, for brain_get. start counts messages already passed (0 is the first)."""
-        if not self.db.is_file():
-            return {"error": "no session index yet"}
+    def read(self, ident: str, offset: int = 0) -> dict:
+        """One page of a past session's text, in the shape the engine's get gives a session. An id that ends in a
+        message number (#n, as a search shows it) opens at that message; offset, when given, is where the page
+        starts, and next_offset continues it."""
+        place = record.parse_place(ident)
+        if place is None:
+            return {"error": f"{ident!r} is not a session id; one reads like hermes:<session id> or hermes:<session id>#12"}
+        harness, session_id, at = place
+        ref = record.session_ref(harness, session_id)
         try:
-            page = session_continuity.read_session(self.db, session_id, harness=harness,
-                                                   start=max(0, int(start)) + 1, limit=max(1, min(int(limit), 200)))
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            return {"error": f"session could not be read: {type(exc).__name__}"}
+            page = record.read(self.db, harness, session_id, self.zone, offset=max(0, int(offset)), at=at)
+        except record.NoSuchMessage as missing:
+            return {"error": f"{ref} has no message {missing.n}; it holds {missing.messages}. Open {ref} from its "
+                             "start, or use a number a search showed."}
+        except (sqlite3.Error, OSError) as exc:
+            return {"error": f"the session could not be read: {type(exc).__name__}"}
         if page is None:
-            return {"error": f"no session {harness}:{session_id} in the index"}
-        session = page.session
-        return {
-            "side": "history",
-            "id": f"{session.harness}:{session.session_id}",
-            "harness": session.harness,
-            "title": session.title,
-            "cwd": session.cwd,
-            "started_at": clock_time(session.started_at),
-            "updated_at": clock_time(session.updated_at),
-            "message_count": session.message_count,
-            "messages": [{"n": message.position, "role": message.role, "at": clock_time(message.timestamp),
-                          "text": message.text} for message in page.messages],
-            "next_start": page.next_start - 1 if page.next_start else None,
+            return {"error": f"no session {ref} in the record"}
+        row = {
+            "id": ref,
+            "tool": page["harness"],
+            "title": single_line(page["title"], max_chars=TITLE_CHARS, ellipsis=ELLIPSIS),
+            "cwd": page["cwd"],
+            "started_at": record.clock(page["started_at"], self.zone),
+            "updated_at": record.clock(page["updated_at"], self.zone),
+            "messages": page["messages"],
+            "content": page["text"],
         }
+        pages = {"content": {"offset": page["offset"], "returned": page["returned"], "total": page["chars"],
+                             "next_offset": page["next_offset"]}}
+        return {"entity": "session", "id": ref, "row": row, "pages": pages, "truncated": False}
 
-    def counts(self) -> dict[str, int]:
+    def forget(self, ident: str) -> dict:
+        """Remove one session's words from the record and keep it out of later refreshes, whether or not its tool
+        still has it. The engine's own `brain sessions forget`."""
+        place = record.parse_place(ident)
+        if place is None:
+            return {"error": f"{ident!r} is not a session id; one reads like hermes:<session id>"}
+        harness, session_id, _ = place
         if not self.db.is_file():
-            return {}
+            return {"error": "there is no record of past sessions here yet"}
+        with self._lock:
+            removed = record.forget(self.db, harness, session_id)
+        return {"status": "forgotten", "session": record.session_ref(harness, session_id), "messages_removed": removed}
+
+    def status(self) -> dict:
+        """What the record holds, in counts only: sessions per tool, messages, the last refresh."""
         try:
-            conn = session_continuity.connect_readonly(self.db)
-        except Exception:
-            return {}
-        try:
-            return {row[0]: row[1] for row in conn.execute(
-                "SELECT harness, count(*) FROM session_sources GROUP BY harness ORDER BY harness")}
-        except sqlite3.Error:
-            return {}
-        finally:
-            conn.close()
+            return record.status(self.db)
+        except (sqlite3.Error, OSError):
+            return {"exists": False, "sessions": {}, "messages": 0}

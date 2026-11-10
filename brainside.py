@@ -1,9 +1,10 @@
 """The truth side: the vendored agent-si engine, read and written in-process.
 
-One brain is one folder (brain.toml, brain.sqlite3, ROUTER.md). Reads go through the engine's own tool runner, so
-Hermes sees exactly what the engine's MCP server would answer. Writes are change packets through the engine's
-applier, which runs the evidence gate. Two agents are configured for the plugin: `hermes` writes records, and
-`hermesuser`, a collector allowed to author sources for the principal, captures the user's own messages."""
+One brain is one folder (brain.toml, brain.sqlite3, ROUTER.md, and sessions.sqlite3, the engine's record of past
+sessions, which history.py reads). Reads go through the engine's own tool runner, so Hermes sees exactly what the
+engine's MCP server would answer. Writes are change packets through the engine's applier, which runs the evidence
+gate. Two agents are configured for the plugin: `hermes` writes records, and `hermesuser`, a collector allowed to
+author sources for the principal, captures the user's own messages."""
 from __future__ import annotations
 
 import json
@@ -127,13 +128,35 @@ class Brain:
         result = self.run("brief", {})
         return result.text if not result.is_error else ""
 
-    def search(self, query: str, limit: int = 25) -> list[dict]:
+    def search(self, query: str, limit: int = 10, *, since: str = "", until: str = "") -> dict:
+        """The engine's search answer for the brain's own rows: hits, next_offset, warnings. since and until are
+        local YYYY-MM-DD days. With no words and no dates there is nothing to rank, so the answer has no hits."""
         query = re.sub(r"\s+", " ", str(query or "")).strip()[:200]
-        if not query:
-            return []
-        answer = self.read("search", {"query": query, "limit": max(1, min(int(limit), 25))})
-        hits = answer.get("hits") if isinstance(answer, dict) else None
-        return list(hits) if isinstance(hits, list) else []
+        arguments: dict = {"limit": max(1, min(int(limit), 25))}
+        if query:
+            arguments["query"] = query
+        for name, day in (("since", since), ("until", until)):
+            if day:
+                arguments[name] = day
+        if len(arguments) == 1:
+            return {"query": "", "hits": [], "warnings": []}
+        return self.read("search", arguments)
+
+    def timezone(self) -> str:
+        """The brain's time zone, which dates and clock times in its answers are in."""
+        try:
+            return self.config().timezone or "UTC"
+        except Exception:
+            return "UTC"
+
+    def sessions_setting(self) -> tuple[bool, dict[str, str]]:
+        """brain.toml's [sessions]: whether past sessions are recorded (on unless it says record = false), and any
+        other Hermes profiles it names as name = path to state.db."""
+        try:
+            sessions = self.config().sessions
+        except Exception:
+            return True, {}
+        return bool(sessions.record), dict(sessions.hermes_profiles)
 
     def get(self, ident: str, offset: int = 0) -> dict:
         ident = str(ident or "").strip()

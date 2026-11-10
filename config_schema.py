@@ -35,11 +35,11 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         ),
         ProviderField(
             key="index_sessions",
-            label="Index past agent sessions",
+            label="Record past agent sessions",
             kind=KIND_BOOL,
             default="true",
-            description="Search your past Hermes, Claude Code, Codex and Grok sessions on this machine alongside the "
-                        "brain. Messages that look like secrets are never indexed.",
+            description="Keep what was said in your past Hermes, Claude Code, Codex and Grok sessions on this machine "
+                        "beside the brain, to search. Messages that look like secrets are never recorded.",
             inline=True,
         ),
     ),

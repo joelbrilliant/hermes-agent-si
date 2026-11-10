@@ -1,4 +1,5 @@
-"""`hermes agent-si status | demo [--off] | check`, shown while agent-si is the active memory provider.
+"""`hermes agent-si status | demo [--off] | check | forget <session id>`, shown while agent-si is the active memory
+provider.
 
 Hermes imports this file on its own (never the provider module), so it stays light until a command runs."""
 from __future__ import annotations
@@ -21,7 +22,7 @@ def _home() -> Path:
 def _status(home: Path) -> int:
     from . import settings
     from .brainside import Brain
-    from .history import History, roots_for
+    from .history import History, record_path, roots_for
 
     current = settings.load(home)
     folder, chosen = settings.brain_dir(home, current)
@@ -38,14 +39,25 @@ def _status(home: Path) -> int:
         print(f"  writes:      {'allowed (brain_remember works)' if writable else why}")
         problems = brain.problems()
         print(f"  check:       {'no problems' if not problems else '; '.join(problems)}")
-    enabled = settings.as_bool(current.get("index_sessions"), True)
-    history = History(settings.sessions_db(home), roots_for(home), enabled=enabled)
-    if not enabled:
-        print("  sessions:    indexing is off (index_sessions = no)")
+    wanted = settings.as_bool(current.get("index_sessions"), True)
+    recorded = brain.sessions_setting()[0] if brain.exists else True
+    if not wanted:
+        print("  sessions:    not recorded (index_sessions = no)")
+    elif not recorded:
+        print("  sessions:    not recorded (this brain's brain.toml says record = false under [sessions])")
+    elif not brain.exists:
+        print("  sessions:    recorded beside the brain once it exists")
     else:
-        counts = history.counts()
-        where = history.db if history.db.is_file() else "no index yet (built after the first turn)"
-        print(f"  sessions:    {where}" + (" | " + ", ".join(f"{k} {v}" for k, v in counts.items()) if counts else ""))
+        history = History(record_path(brain.dir), roots_for(home), zone=brain.timezone())
+        held = history.status()
+        if held.get("exists"):
+            per_tool = ", ".join(f"{tool} {count}" for tool, count in held["sessions"].items()) or "none yet"
+            print(f"  sessions:    {history.db} | {per_tool} | {held['messages']} messages")
+        else:
+            print(f"  sessions:    {history.db} [no record yet; it is built in the background from the first turn]")
+    old = settings.old_sessions_index(home)
+    if old.is_file():
+        print(f"  left over:   {old} is the session index 0.1.x built. Nothing reads it now, so it is yours to delete.")
     print("  model:       none   network: none   dependencies: none")
     return 0
 
@@ -89,6 +101,25 @@ def _check(home: Path) -> int:
     return 1 if problems else 0
 
 
+def _forget(home: Path, session: str) -> int:
+    from . import settings
+    from .brainside import Brain
+    from .history import History, record_path, roots_for
+
+    folder, _ = settings.brain_dir(home)
+    brain = Brain(folder)
+    if not brain.exists:
+        print(f"agent-si: no brain at {folder} yet, so no record of past sessions either")
+        return 1
+    outcome = History(record_path(brain.dir), roots_for(home), zone=brain.timezone()).forget(session)
+    if outcome.get("error"):
+        print(f"agent-si: {outcome['error']}")
+        return 1
+    print(f"agent-si: {outcome['session']} is out of the record ({outcome['messages_removed']} messages removed) and "
+          "stays out. Its own tool still has whatever it kept.")
+    return 0
+
+
 def main(args) -> int:
     command = getattr(args, "agent_si_command", None)
     home = _home()
@@ -98,15 +129,19 @@ def main(args) -> int:
         return _demo(home, bool(getattr(args, "off", False)))
     if command == "check":
         return _check(home)
-    print("Usage: hermes agent-si <status|demo [--off]|check>")
+    if command == "forget":
+        return _forget(home, str(getattr(args, "session", "") or ""))
+    print("Usage: hermes agent-si <status|demo [--off]|check|forget <session id>>")
     return 2
 
 
 def register_cli(subparser) -> None:
     """Build the `hermes agent-si` argparse tree (called by Hermes at argparse setup time)."""
     subs = subparser.add_subparsers(dest="agent_si_command")
-    subs.add_parser("status", help="Where the brain and the session index are, and whether writes work")
+    subs.add_parser("status", help="Where the brain and its record of past sessions are, and whether writes work")
     demo = subs.add_parser("demo", help="Build the Example Co demo brain and select it")
     demo.add_argument("--off", action="store_true", help="Switch back to your own brain")
     subs.add_parser("check", help="Run the engine's integrity check on the brain")
+    forget = subs.add_parser("forget", help="Remove one past session from the record, and keep it out")
+    forget.add_argument("session", help="A session id as brain_search shows it, such as hermes:20261110_091500_ab12")
     subparser.set_defaults(func=main)

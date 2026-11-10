@@ -2,25 +2,23 @@
 
 Copied byte for byte by `tools/vendor.py`. Nothing here is edited; a change belongs upstream.
 
-- agent-si: https://github.com/joelbrilliant/agent-si at fe4657e1378dbbd4334fa9d99885b1263241849e (`src/brain/`, the modules the plugin imports, plus LICENSE and NOTICE,
-  and `examples/demo/` as `demo/`).
-- agent-memory: https://github.com/joelbrilliant/agent-memory at 8ddd122fe57ee5f80f4970be14e395922b1bd5c3 (`session_continuity.py`, `session_adapters.py`,
-  `db_permissions.py`, `ingest.py`, plus LICENSE and NOTICE).
+- agent-si: https://github.com/joelbrilliant/agent-si at b802ae925e42b0cf35c4e89333748da36ab717b4 (`src/brain/`, the modules the plugin imports, plus LICENSE and NOTICE,
+  and `examples/demo/` as `demo/`). Past sessions are recorded by the engine's own `brain.sessions`.
 
 | file | sha256 |
 |---|---|
-| vendor/brain/__init__.py | a22b5a9a2b182e9de5ac5237b86bfee5908921e60e4fd8192dcb3352654d870f |
-| vendor/brain/advice.py | 6d83c40adcc886aa051628cb4cb5be843b5b7bd61d620b6fe13d6fb36b9b006e |
-| vendor/brain/applier.py | 58e07b582f3b7f341f59ddb773fa4aaaff79c827e46a73bccabb6bb12bb8451b |
+| vendor/brain/__init__.py | be109590ea4fe3d43086faad203a7023db3261b9b17bbd97d8bdfb90f79819aa |
+| vendor/brain/advice.py | e860a0f231f58832d3bffb0ba29853ad7292a4434b89a29e6c835654372c57ee |
+| vendor/brain/applier.py | 215f06dda022bf68e61e7c88893ed1f5ced09e92fa283376336094b732185db5 |
 | vendor/brain/candidates.py | f1bfc0cc60007b81d116f5c24c88eac82e57d5cbd39aca5ae273a17fde626c22 |
 | vendor/brain/collect.py | c675139e09c2be352fa4735bc423c19d7c2dd4c8632854f6eeff022e04bbc16e |
-| vendor/brain/config.py | 630fcace4d036219443d56180b3e2d73552b1eb907b796ff9bd7face7f1b36f0 |
+| vendor/brain/config.py | e56fed07fbb142f8c6f80124ef7eeb86cb9f39c73e6e74badcb23c204b683c66 |
 | vendor/brain/evidence_gate.py | 56dca7ff835c06667a040f59dd22a087921efbd2d76d499a6e45584b3ba9e175 |
-| vendor/brain/ingress.py | 857158f1b8ece7ceb23016b171f34df678f60e281c18a9c3b663bb53d60579aa |
+| vendor/brain/ingress.py | e20ee4bff588d7e6d6166f6390c3e6f0e373b51b9c98218c281157d0807683a6 |
 | vendor/brain/init.py | b493b6c375716e9348a9104bbb21c9a45320c443a82e6b1fa9a4a1f394d9f210 |
 | vendor/brain/marks.py | cad12487ad6af7c777fc73aec5af36ba106f6b0aa61ce4aa8ee10209976e16e1 |
 | vendor/brain/migrate.py | 68632c786d3a17c14b2862eff59e6f37c1ce3cbdaeddf63d7c2d75528c10dc28 |
-| vendor/brain/reads.py | f445dcda51ecb9f5dabe397af487210fe3ac570d8799c524a5f71a8c347b3ead |
+| vendor/brain/reads.py | 97adba1b884e3bf904a8e911cc956267dc3c31c4ed609dc841627be4b4846e06 |
 | vendor/brain/redact_ops.py | 2bc18776031ddd5712622ef62e0d3b50430e2eae5fe8ec62a16a422ec237092a |
 | vendor/brain/registry.py | 5a4711c685565a9e5d0bc9dc9e9f0e46482d2b7ba4352adeb03fec8d5f11ef10 |
 | vendor/brain/schemas.py | 561566991db0476ea4c1873795fa6a6c811646b025705afaf7aae4b3a31332bf |
@@ -51,16 +49,14 @@ Copied byte for byte by `tools/vendor.py`. Nothing here is edited; a change belo
 | vendor/brain/migrations/0007_folders.sql | 9ef6fbc85b03e4c1986654281b504161b5d125f3990175ed96731f4680d556af |
 | vendor/brain/migrations/0008_links.sql | 69398fc103e5282b3d3cb5ede2a450f19186d0baf994717ed6f2c93af102560e |
 | vendor/brain/migrations/0009_source_author.sql | f0bcb4ca70b1159aabc5d3daf81739d015ad4f48425b0f1c2d17b93c59eac1e4 |
+| vendor/brain/sessions/__init__.py | ad39ae45c2b35825eab74109566fd37ae4c7529d0e000b8146de46485aa7b465 |
+| vendor/brain/sessions/adapters.py | 578321a714882fa302f0269d486a353e9d88cccdfcbf083c4d735a9617488aa8 |
+| vendor/brain/sessions/cite.py | d3be9db6566802464cdee1d9ad7175e766a149b57930f4915a39553f46d58fbc |
+| vendor/brain/sessions/record.py | c41fc73b932c28a9c27b78f030f270173251fe17c9d58a982cc47da6246ea7cf |
 | vendor/brain/templates/ROUTER.md.template | 46871ec8529cd84a2b5d8d767f9ac6415371828776959c1a805e3b4ef51a0154 |
 | vendor/brain/templates/brain.toml.template | 58bdbc9d5f142241996dd9d677fb9e49f3c3536478b6a618e0e7c860729e8682 |
 | vendor/LICENSE-agent-si | 517dea67b88518fbe5bcaeff69711720730aa6e32b5879e3ea5e62c644f1947b |
-| vendor/LICENSE-agent-memory | 517dea67b88518fbe5bcaeff69711720730aa6e32b5879e3ea5e62c644f1947b |
 | vendor/NOTICE-agent-si | 57376aaa63e362dfcaa17f49c2cc17ecb542d466e712168470eb3041c18518a8 |
-| vendor/NOTICE-agent-memory | 70a048e5448c73f48ba21bfc2ff5ca7427c7eb9d7fd598cf37cf5f2769be256a |
-| vendor/session_continuity.py | b83e2ac2a0e504b2638bfc1c4c174d7ba3feb6c1a1bb88ed132e0b2778f9eab4 |
-| vendor/session_adapters.py | 2d54ed9e0f75e6f06846e5f91b991f841f1230037d9e98b37728ee7df26e790d |
-| vendor/db_permissions.py | 64f005f7beb10c5a09e930ec39a50705646dffc1364cce8d8edd106d939c40cb |
-| vendor/ingest.py | 5cbc5fc7be73f94f2a9378f8b6112bbdc2163f8255840a02cd82a221a77c7a9d |
 | demo/demo.toml | 3bc0a4e785dea8cdf79513bc658e949ea3a4fddde7034d3db2dfcc56abe07d33 |
 | demo/fixtures/mail.json | 4d37cadc5ebca77982daf9e6c6f25906082fb1fe8d9706e72149938a9a8a8df7 |
 | demo/packets/1-notes.json | 20e2158834d55d58a9f280c68a8f7627899de6aeedb2395bd20af14005363ddc |

@@ -47,7 +47,8 @@ def demo_dir(home: Path) -> Path:
     return data_dir(home) / DEMO_NAME
 
 
-def sessions_db(home: Path) -> Path:
+def old_sessions_index(home: Path) -> Path:
+    """The session index 0.1.x built. 0.2.0 records sessions beside the brain instead and never opens this file."""
     return data_dir(home) / "sessions.db"
 
 

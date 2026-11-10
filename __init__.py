@@ -1,9 +1,9 @@
 """agent-si: a sourced, model-free memory provider for Hermes Agent.
 
-Two stores, one face. The brain (agent-si's engine, vendored) holds what is true now as rows that cite sources and
-quotes, behind an evidence gate that refuses words put in the owner's mouth. The session index (agent-memory,
-vendored) holds what happened before, across Hermes, Claude Code, Codex and Grok on the same machine. One search
-merges both by rank. No model, no key, no network, no dependencies.
+One engine, one face. agent-si's engine (vendored) holds what is true now as rows that cite sources and quotes,
+behind an evidence gate that refuses words put in the owner's mouth, and beside them its record of what was said
+before, word for word, across Hermes, Claude Code, Codex and Grok on the same machine. One search covers both. No
+model, no key, no network, no dependencies.
 
 Tools: brain_search, brain_get, brain_remember. Each turn, a compact recall block for the current message.
 """
@@ -26,7 +26,7 @@ from . import fuse
 from . import remember as evidence
 from . import settings
 from .brainside import AGENT, COLLECTOR, Brain
-from .history import History, day_bounds, roots_for
+from .history import SESSIONS_ALONE, SESSIONS_BESIDE, History, record_path, roots_for, valid_days
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +39,9 @@ PREFETCH_HITS = 5
 PREFETCH_CHARS = 1600
 PREFETCH_QUERY_CHARS = 300
 BRIEF_CHARS = 1800
-TRUTH_LIST = 25
-HISTORY_LIST = 25
 MESSAGE_MEMORY = 400
-HARNESSES = ("hermes", "claude", "codex", "grok")
+SESSIONS_OFF = ("past sessions are not recorded here (index_sessions is off in the plugin's settings, or the brain's "
+                "brain.toml says record = false under [sessions])")
 
 RULES = """Rules for this memory:
 - Facts about the user, their people, plans, systems and past work come from brain_search and brain_get, never from memory or prose. Name the source and its date when it matters.
@@ -59,13 +58,14 @@ TOOLS: list[dict[str, Any]] = [
         "name": "brain_search",
         "description": (
             "Search the user's brain (facts, records, people, projects, open work, each with a source and date) and "
-            "the history of past agent sessions on this machine (Hermes, Claude Code, Codex, Grok) in one ranked list. "
+            "its record of past agent sessions on this machine (Hermes, Claude Code, Codex, Grok), in one call. "
             "Keyword search, no model: use the words the user would have used. A hit can match any of the words, "
             "with more and rarer matches first, so search again with other words when the first try misses. Call it "
-            "before answering anything about the user's facts, plans, people or past work. For a question about a "
-            "time, pass since and until; with dates, words that match nothing give that period's sessions, newest "
-            "first, and query may be left out. Each hit says which side found it; open a hit with brain_get before "
-            "relying on it. If nothing comes back, say the brain has nothing on it."
+            "before answering anything about the user's facts, plans, people or past work. The answer has hits (the "
+            "brain's sourced rows) and sessions (past conversations: a few leads beside the hits, more of them when "
+            "the brain has none). For a question about a time, pass since and until; with dates, words that match "
+            "nothing give that period's sessions, newest first, and query may be left out. Open a hit or a session "
+            "with brain_get before relying on it. If nothing comes back, say the brain has nothing on it."
         ),
         "parameters": {
             "type": "object",
@@ -73,7 +73,8 @@ TOOLS: list[dict[str, Any]] = [
                 "query": {"type": "string", "description": "A few words or a question."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8},
                 "side": {"type": "string", "enum": ["all", "truth", "history"], "default": "all",
-                         "description": "all (default), truth (the brain only) or history (past sessions only)."},
+                         "description": "all (default), truth (the brain only) or history (past sessions only, "
+                                        "more of them and more of each)."},
                 "since": {"type": "string",
                           "description": "Only hits dated on or after this local day, YYYY-MM-DD."},
                 "until": {"type": "string",
@@ -87,16 +88,16 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Open one hit in full: a brain row with its sources, quotes and related rows (ids like rec-…, src-…, "
             "act-…, dec-…, per-…, a project id, or a fact key such as vendor.compliance.instance, which also shows "
-            "whether sources disagree), or a past session's messages (an id like hermes:<session id> as brain_search "
-            "shows it; pass the hit's open_at as offset to start just before its excerpt). Long bodies come in "
-            "pages: pass offset."
+            "whether sources disagree), or a past session (an id like hermes:<session id>#12, exactly as "
+            "brain_search shows it: the page starts at that message, each message under its number, who spoke and "
+            "when). Long bodies and sessions come in pages: pass the answer's next_offset as offset."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "The id exactly as brain_search showed it."},
                 "offset": {"type": "integer", "minimum": 0, "default": 0,
-                           "description": "Where to continue a long body or session (next_offset / next_start)."},
+                           "description": "Where to continue a long body or session (the answer's next_offset)."},
             },
             "required": ["id"],
         },
@@ -215,11 +216,21 @@ class AgentSiMemoryProvider(MemoryProvider):
                 except Exception as exc:
                     self._setup_error = f"the brain could not be created: {exc}"
                     logger.warning("agent-si: %s", self._setup_error)
-        self._history = History(settings.sessions_db(home), roots_for(home),
-                                enabled=settings.as_bool(self._settings.get("index_sessions"), True))
+        self._history = self._open_history(home)
         self._prompt_block = self._build_prompt_block()
         if self._context == "primary":
             self._start_refresh()
+
+    def _open_history(self, home: Path) -> Optional[History]:
+        """The record of past sessions beside the brain. Off when the plugin's setting says so or the brain's own
+        brain.toml says record = false, and absent while there is no brain to keep it beside."""
+        brain = self._brain
+        if brain is None or not brain.exists:
+            return None
+        wanted = settings.as_bool(self._settings.get("index_sessions"), True)
+        recorded, profiles = brain.sessions_setting()
+        return History(record_path(brain.dir), roots_for(home, profiles=profiles), zone=brain.timezone(),
+                       enabled=wanted and recorded)
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False,
                           rewound: bool = False, **kwargs) -> None:
@@ -266,39 +277,30 @@ class AgentSiMemoryProvider(MemoryProvider):
     # -- per-turn recall ---------------------------------------------------------------------------------------
 
     def _ready(self) -> bool:
-        return self._brain is not None and self._brain.exists or (self._history is not None and self._history.enabled)
+        return self._brain is not None and self._brain.exists
 
-    def _search(self, query: str, *, limit: int, side: str, session_id: str, all_terms_first: bool = False,
-                since: str = "", until: str = "") -> tuple[list[dict], bool]:
-        """The merged hits, and whether the history side is the period's sessions because no word matched there.
-        since and until are local YYYY-MM-DD days, both included; day_bounds raises ValueError on another shape."""
-        start, end = day_bounds(since, until)
-        dated = start is not None or end is not None
-        truth: list[dict] = []
-        history: list = []
-        listed = False
-        if side in ("all", "truth") and self._brain is not None and self._brain.exists:
-            truth = self._brain.search(query, TRUTH_LIST)
-            if dated:
-                truth = [hit for hit in truth if hit.get("date")
-                         and (not since or str(hit["date"])[:10] >= since)
-                         and (not until or str(hit["date"])[:10] <= until)]
-        if side in ("all", "history") and self._history is not None:
-            history = self._history.search(query, limit=HISTORY_LIST, current_session_id=session_id or None,
-                                           all_terms_first=all_terms_first, since=start, before=end)
-            if dated and not history:
-                history = self._history.period(start, end, limit=HISTORY_LIST, current_session_id=session_id or None)
-                listed = bool(history)
-        return fuse.merge(truth, history, limit), listed
+    @staticmethod
+    def _asking(session_id: str) -> Optional[tuple[str, str]]:
+        """The live Hermes session, which a search leaves out: its words are already in front of the model."""
+        return ("hermes", session_id) if session_id else None
+
+    def _recall(self, query: str, session_id: str) -> list[dict]:
+        """The few hits for the recall nobody asked for: the brain's best rows and the best past sessions for the
+        message, taken in turn by rank. Read from the record as it stands, so a turn never waits on a refresh."""
+        truth = list(self._brain.search(query, PREFETCH_HITS).get("hits") or [])
+        sessions: list[dict] = []
+        if self._history is not None:
+            # Messages holding every word come first here, and any word only when none do.
+            sessions, _ = self._history.find(query, limit=PREFETCH_HITS, deep=False, asking=self._asking(session_id),
+                                             all_terms_first=True)
+        return fuse.merge(truth, sessions, PREFETCH_HITS)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._status = None
         if is_trivial_prompt(query) or not self._ready():
             return ""
         try:
-            # Recall nobody asked for keeps messages holding every word first, as agent-memory's own hook does.
-            items, _ = self._search(_query_text(query), limit=PREFETCH_HITS, side="all",
-                                    session_id=session_id or self._session_id, all_terms_first=True)
+            items = self._recall(_query_text(query), session_id or self._session_id)
         except Exception as exc:
             logger.warning("agent-si prefetch failed: %s", exc)
             return ""
@@ -327,8 +329,8 @@ class AgentSiMemoryProvider(MemoryProvider):
     def _refresh(self) -> None:
         try:
             self._history.refresh()
-        except Exception as exc:  # the cached index keeps serving
-            logger.warning("agent-si session index refresh failed: %s", exc)
+        except Exception as exc:  # the record as it was keeps answering
+            logger.warning("agent-si session record refresh failed: %s", exc)
 
     # -- the user's words this session ---------------------------------------------------------------------
 
@@ -379,30 +381,50 @@ class AgentSiMemoryProvider(MemoryProvider):
         side = str(args.get("side") or "all")
         if side not in ("all", "truth", "history"):
             return {"error": "side must be all, truth or history"}
-        if self._brain is None or (not self._brain.exists and side == "truth"):
+        if not self._ready():
             return {"error": self._setup_error or "the brain is not set up; run hermes memory setup"}
-        try:
-            items, listed = self._search(query, limit=limit, side=side, session_id=self._session_id,
-                                         since=since, until=until)
-        except ValueError:
+        if not valid_days(since, until):
             return {"error": "since and until are local days written like 2026-11-09"}
-        out = {
-            "query": query,
-            "hits": items,
-            "truth_hits": sum(1 for item in items if item["side"] == "truth"),
-            "history_hits": sum(1 for item in items if item["side"] == "history"),
-        }
-        if since or until:
-            out["since"], out["until"] = since, until
-        if listed:
-            out["note"] = ("No past session in that period matches these words, so the history hits are the "
-                           "period's sessions, newest first.")
-        if not items:
-            out["answer"] = ("Nothing in the brain or the session index matches this. Say the brain has nothing on it "
+        history = self._history if self._history is not None and self._history.enabled else None
+        if side == "history" and history is None:
+            return {"error": SESSIONS_OFF}
+        answer: dict = {"query": query, "hits": [], "warnings": []}
+        if side != "history":
+            # The engine's own answer for the brain's rows. A refusal (no word to search by, say) is passed on as it is.
+            answer = self._brain.search(query, limit, since=since, until=until)
+            if answer.get("error"):
+                return answer
+        sessions: list[dict] = []
+        note = ""
+        if side != "truth" and history is not None:
+            if self._context == "primary":
+                self._refresh_now(history)
+            only = side == "history"
+            alone = not answer.get("hits")
+            sessions, note = history.find(
+                query, limit=limit if only else SESSIONS_ALONE if alone else SESSIONS_BESIDE, deep=only or alone,
+                since=since, until=until, asking=self._asking(self._session_id))
+        out = dict(answer)
+        if sessions:
+            out["sessions"] = sessions
+        if note:
+            out["warnings"] = [*(out.get("warnings") or []), note]
+        if not out.get("hits") and not sessions:
+            out["answer"] = ("Nothing in the brain or its past sessions matches this. Say the brain has nothing on it "
                              "rather than guessing; try other words only if the user would have used them.")
         else:
-            out["next"] = "Open a hit with brain_get before relying on it. 'side' says which store found it."
+            out["next"] = ("Open one with brain_get before relying on it. hits are the brain's sourced rows; sessions "
+                           "are past conversations, and a session's id opens it at the line shown.")
         return out
+
+    @staticmethod
+    def _refresh_now(history: History) -> None:
+        """Bring the record up to date before a search the model asked for, as the engine's own search does. A
+        refresh already running is left to finish, and a failure leaves the record as it was to answer."""
+        try:
+            history.refresh(wait=False)
+        except Exception as exc:
+            logger.warning("agent-si session record refresh failed: %s", exc)
 
     def _tool_get(self, args: dict) -> dict:
         ident = str(args.get("id") or "").strip()
@@ -412,13 +434,12 @@ class AgentSiMemoryProvider(MemoryProvider):
             offset = max(0, int(args.get("offset") or 0))
         except (TypeError, ValueError):
             return {"error": "offset must be a whole number"}
-        harness, _, session_id = ident.partition(":")
-        if session_id and harness in HARNESSES:
-            if self._history is None:
-                return {"error": "the session index is off"}
-            return self._history.read(harness, session_id, start=offset)
-        if self._brain is None or not self._brain.exists:
+        if not self._ready():
             return {"error": self._setup_error or "the brain is not set up; run hermes memory setup"}
+        if History.is_session(ident):
+            if self._history is None or not self._history.enabled:
+                return {"error": SESSIONS_OFF}
+            return self._history.read(ident, offset)
         return self._brain.get(ident, offset)
 
     def _tool_remember(self, args: dict) -> dict:
@@ -529,7 +550,7 @@ class AgentSiMemoryProvider(MemoryProvider):
             {"key": "brain_dir", "default": "",
              "description": "An existing brain folder to use (blank: one is created inside this Hermes home)"},
             {"key": "index_sessions", "default": "yes", "choices": ["yes", "no"],
-             "description": "Index past Hermes, Claude Code, Codex and Grok sessions on this machine"},
+             "description": "Record past Hermes, Claude Code, Codex and Grok sessions on this machine, to search"},
         ]
 
     def save_config(self, values: dict[str, Any], hermes_home: str) -> None:

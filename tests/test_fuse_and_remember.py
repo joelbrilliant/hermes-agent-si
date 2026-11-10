@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 from datetime import date
-from types import SimpleNamespace
 
 
-def _hit(session_id: str, title: str, text: str):
-    return SimpleNamespace(harness="hermes", session_id=session_id, title=title, cwd="", started_at=1.0,
-                           updated_at=1_700_000_000.0, source_path="", score=1.0,
-                           messages=(SimpleNamespace(role="user", timestamp=1.0, text=text, position=0),))
+def _session(session_id: str, title: str, text: str, n: int = 4) -> dict:
+    """A past session as the engine's search gives it: the id ends in the excerpt's message number."""
+    return {"id": f"hermes:{session_id}#{n}", "title": title, "date": "2026-10-02",
+            "excerpts": [{"n": n, "role": "user", "text": text, "at": "2026-10-02 09:15"}]}
 
 
 def test_rrf_prefers_an_item_both_sides_rank(plugin_module):
@@ -21,15 +20,18 @@ def test_rrf_prefers_an_item_both_sides_rank(plugin_module):
 def test_merge_labels_sides_and_keeps_limit(plugin_module):
     fuse = plugin_module("fuse")
     truth = [{"entity": "record", "id": "rec-a", "title": "A", "snippet": "x [y] z", "date": "2026-10-01"}]
-    history = [_hit("s1", "Session one", "we moved the launch to March")]
+    history = [_session("s1", "Session one", "we moved the launch to March")]
     items = fuse.merge(truth, history, limit=5)
     assert {item["side"] for item in items} == {"truth", "history"}
     assert items[0]["score"] >= items[1]["score"]
     truth_item = next(item for item in items if item["side"] == "truth")
     assert truth_item["snippet"] == "x y z"  # the engine's [match] marks are dropped
     history_item = next(item for item in items if item["side"] == "history")
-    assert history_item["id"] == "hermes:s1" and history_item["excerpt"].startswith("we moved")
+    # the id keeps its message number, so brain_get opens the session at that line
+    assert history_item["id"] == "hermes:s1#4" and history_item["excerpt"].startswith("we moved")
     assert len(fuse.merge(truth * 3, history, limit=1)) == 1
+    # one session found at two of its lines is one item
+    assert len(fuse.merge([], history + [_session("s1", "Session one", "another line", n=9)], limit=5)) == 1
 
 
 def test_recall_block_stays_in_budget_and_names_both_sides(plugin_module):

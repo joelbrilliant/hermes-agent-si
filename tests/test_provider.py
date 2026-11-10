@@ -1,5 +1,6 @@
 """The provider end to end in a fresh Hermes home: the brain is created, recall works, remember is gated, the
-session index finds past sessions in both Hermes schemas, and the demo brain shows a disputed fact."""
+engine's session record beside the brain finds past sessions in both Hermes schemas, and the demo brain shows a
+disputed fact."""
 from __future__ import annotations
 
 import json
@@ -66,15 +67,15 @@ def test_remember_is_gated_then_searchable(provider):
     assert row["source"]["author_person_id"] == "per-alex-example" and row["source"]["kind"] == "user_note"
     source = call(provider, "brain_get", id=source_id)
     assert "moved the widget launch to March" in json.dumps(source)
-    # search finds it, labelled truth, and the recall block carries it
+    # search finds it as a row of the brain, and the recall block carries it
     found = call(provider, "brain_search", query="widget launch March")
-    assert found["truth_hits"] >= 1 and found["hits"][0]["id"] == record_id and found["hits"][0]["side"] == "truth"
+    assert found["hits"][0]["id"] == record_id and found["hits"][0]["entity"] == "record"
     block = provider.prefetch("when is the widget launch?")
     assert record_id in block and provider.recall_status().count >= 1
     # dates keep the brain's rows dated inside them
     today = found["hits"][0]["date"]
-    assert call(provider, "brain_search", query="widget launch March", since=today)["truth_hits"] >= 1
-    assert call(provider, "brain_search", query="widget launch March", until="2000-01-01")["truth_hits"] == 0
+    assert call(provider, "brain_search", query="widget launch March", since=today)["hits"]
+    assert call(provider, "brain_search", query="widget launch March", until="2000-01-01")["hits"] == []
     # remembering the same thing again is idempotent (same ids, same receipt)
     again = call(provider, "brain_remember", fact="The widget launch is in March. Sam's team owns the rollout.",
                  quote="moved the widget launch to March, and Sam's team owns the rollout",
@@ -103,8 +104,13 @@ def test_bad_ids_and_unknown_tools_answer_cleanly(provider):
     assert "error" in missing or missing.get("code")
 
 
+def session_ids(answer: dict) -> list[str]:
+    """The sessions of a brain_search answer, without the message number each id ends in."""
+    return [session["id"].partition("#")[0] for session in answer.get("sessions", [])]
+
+
 @pytest.mark.parametrize("current_schema", [False, True])
-def test_history_indexes_both_hermes_schemas(provider, home, make_state_db, current_schema):
+def test_history_records_both_hermes_schemas(provider, home, make_state_db, current_schema):
     make_state_db(home / "state.db", current_schema=current_schema, sessions=[
         {"id": "old-1", "surface": "cli", "title": "Rollout planning",
          "messages": [("user", "Let's plan the kestrel rollout for the Brisbane office"),
@@ -115,15 +121,27 @@ def test_history_indexes_both_hermes_schemas(provider, home, make_state_db, curr
          "messages": [("user", "kestrel live chat in this very session"), ("assistant", "ok")]},
     ])
     result = provider._history.refresh()
-    assert result.sessions_by_harness.get("hermes") == 2  # the cron session is not a human session
+    assert result.sessions.get("hermes") == 2  # the cron session is not a human session
+    # The record is the engine's own file, beside the brain.
+    assert provider._history.db == provider._brain.dir / "sessions.sqlite3" and provider._history.db.is_file()
     found = call(provider, "brain_search", query="kestrel rollout", side="history")
-    assert found["history_hits"] == 1 and found["hits"][0]["id"] == "hermes:old-1"  # the live session is left out
-    page = call(provider, "brain_get", id="hermes:old-1")
-    assert page["message_count"] == 2 and page["messages"][0]["text"].startswith("Let's plan the kestrel")
-    merged = call(provider, "brain_search", query="kestrel rollout")
-    assert merged["history_hits"] == 1
+    assert session_ids(found) == ["hermes:old-1"] and found["hits"] == []  # the live session is left out
+    page = call(provider, "brain_get", id=found["sessions"][0]["id"])
+    assert page["entity"] == "session" and page["row"]["messages"] == 2
+    assert "Let's plan the kestrel rollout" in page["row"]["content"]
+    both = call(provider, "brain_search", query="kestrel rollout")
+    assert session_ids(both) == ["hermes:old-1"]
     block = provider.prefetch("how did the kestrel rollout go?")
     assert "hermes:old-1" in block
+
+
+def test_a_search_sees_a_session_written_since_the_last_refresh(provider, home, make_state_db):
+    # No refresh is asked for here: a search the model asks for brings the record up to date first.
+    make_state_db(home / "state.db", current_schema=True, sessions=[
+        {"id": "fresh-1", "title": "Petrel", "messages": [("user", "the petrel invoice is due on Friday"),
+                                                          ("assistant", "Friday, noted.")]}])
+    provider.shutdown()  # the first background refresh has finished
+    assert session_ids(call(provider, "brain_search", query="petrel invoice")) == ["hermes:fresh-1"]
 
 
 def test_search_ranks_by_any_word_and_recall_keeps_every_word_first(provider, home, make_state_db):
@@ -135,9 +153,8 @@ def test_search_ranks_by_any_word_and_recall_keeps_every_word_first(provider, ho
          "messages": [("user", "The osprey ledger moved to the shared drive."), ("assistant", "Good.")]},
     ])
     provider._history.refresh()
-    found = call(provider, "brain_search", query="osprey ledger migration", side="history")
-    assert {hit["id"] for hit in found["hits"]} == {"hermes:long-note", "hermes:short-answer"}
-    assert found["hits"][0]["id"] == "hermes:long-note"
+    found = session_ids(call(provider, "brain_search", query="osprey ledger migration", side="history"))
+    assert set(found) == {"hermes:long-note", "hermes:short-answer"} and found[0] == "hermes:long-note"
     # The per-turn recall keeps messages holding every word of the message when one does.
     block = provider.prefetch("osprey ledger migration status")
     assert "hermes:long-note" in block and "hermes:short-answer" not in block
@@ -156,7 +173,7 @@ def test_search_by_date_and_the_period_listing(provider, home, make_state_db):
     provider._history.refresh()
 
     def ids(**args):
-        return [hit["id"] for hit in call(provider, "brain_search", side="history", **args)["hits"]]
+        return session_ids(call(provider, "brain_search", side="history", **args))
 
     assert sorted(ids(query="heron budget")) == ["hermes:march-10", "hermes:march-12"]
     assert ids(query="heron budget", since="2026-03-11") == ["hermes:march-12"]
@@ -166,19 +183,111 @@ def test_search_by_date_and_the_period_listing(provider, home, make_state_db):
     # Words that match nothing in the period give the period's sessions, and so does no query at all.
     listed = call(provider, "brain_search", query="what did we talk about", side="history",
                   since="2026-03-12", until="2026-03-12")
-    assert [hit["id"] for hit in listed["hits"]] == ["hermes:march-12"] and "newest first" in listed["note"]
+    assert session_ids(listed) == ["hermes:march-12"] and "newest first" in listed["warnings"][-1]
     assert ids(since="2026-03-10", until="2026-03-12") == ["hermes:march-12", "hermes:march-10"]
     assert "error" in call(provider, "brain_search", query="heron", since="March")
     assert "error" in call(provider, "brain_search")
 
-    # A hit says where to open its session: two messages before the excerpt.
-    hit = call(provider, "brain_search", query="heron budget raised", side="history", since="2026-03-12")["hits"][0]
-    assert hit["open_at"] == 0 and hit["excerpt_at"] == "2026-03-12 12:02"
-    page = call(provider, "brain_get", id=hit["id"], offset=2)
-    assert [(m["n"], m["text"]) for m in page["messages"]] == [(3, "heron budget raised to fifty"), (4, "Fifty it is.")]
-    assert page["message_count"] == 4 and page["next_start"] is None
-    # times read as local clock time, not seconds
-    assert page["started_at"] == "2026-03-12 12:00" and page["messages"][0]["at"] == "2026-03-12 12:02"
+    # A session's id ends in the message that matched, and opening it shows that message under its number, who
+    # spoke and the local clock time.
+    hit = call(provider, "brain_search", query="heron budget raised", side="history", since="2026-03-12")["sessions"][0]
+    assert hit["id"] == "hermes:march-12#3" and hit["excerpts"][0]["at"] == "2026-03-12 12:02"
+    page = call(provider, "brain_get", id=hit["id"])
+    assert "[3] user 2026-03-12 12:02\nheron budget raised to fifty" in page["row"]["content"]
+    assert "[4] assistant 2026-03-12 12:03\nFifty it is." in page["row"]["content"]
+    assert page["row"]["messages"] == 4 and page["pages"]["content"]["next_offset"] is None
+    assert page["row"]["started_at"] == "2026-03-12 12:00" and page["id"] == "hermes:march-12"
+    assert "no message 9" in call(provider, "brain_get", id="hermes:march-12#9")["error"]
+    assert "error" in call(provider, "brain_get", id="hermes:not-here")
+
+
+def test_sessions_beside_brain_hits_are_a_few_short_leads(provider, home, make_state_db, plugin_module):
+    provider.on_turn_start(1, "For the record, the gannet contract renewal is due on the first of June.")
+    kept = call(provider, "brain_remember", fact="The gannet contract renewal is due on 1 June.",
+                quote="the gannet contract renewal is due on the first of June", title="Gannet contract renewal")
+    assert kept["status"] == "remembered", kept
+    # Each session says its own thing: the record shows one session for words repeated across several.
+    make_state_db(home / "state.db", current_schema=True, sessions=[
+        {"id": f"gannet-{n}", "title": f"Gannet {n}",
+         "messages": [("user", f"gannet contract, point {n}: " + "and more about the renewal terms " * 12),
+                      ("assistant", f"Understood, point {n} of the renewal terms.")]}
+        for n in range(5)])
+    provider._history.refresh()
+    history = plugin_module("history")
+    both = call(provider, "brain_search", query="gannet contract renewal")
+    assert both["hits"] and both["hits"][0]["id"] == kept["record_id"]
+    # beside the brain's hits: a few sessions, one short line each
+    assert len(both["sessions"]) == history.SESSIONS_BESIDE
+    assert all(len(s["excerpts"]) == 1 and len(s["excerpts"][0]["text"]) <= history.LEAD_CHARS + 4 for s in both["sessions"])
+    assert call(provider, "brain_search", query="gannet contract renewal", side="truth").get("sessions") is None
+    # the brain has nothing on these words, so the sessions are the answer and come deeper
+    alone = call(provider, "brain_search", query="understood point")
+    assert alone["hits"] == [] and len(alone["sessions"]) == history.SESSIONS_ALONE
+    assert max(len(s["excerpts"]) for s in alone["sessions"]) > 1
+
+
+def test_a_forgotten_session_leaves_the_record_and_stays_out(provider, home, make_state_db):
+    make_state_db(home / "state.db", current_schema=True, sessions=[
+        {"id": "keep-1", "title": "Keep", "messages": [("user", "the dunlin survey starts on Monday"), ("assistant", "ok")]},
+        {"id": "drop-1", "title": "Drop", "messages": [("user", "the dunlin password hint is private"), ("assistant", "ok")]},
+    ])
+    provider._history.refresh()
+    assert sorted(session_ids(call(provider, "brain_search", query="dunlin", side="history"))) == [
+        "hermes:drop-1", "hermes:keep-1"]
+    gone = provider._history.forget("hermes:drop-1#1")
+    assert gone == {"status": "forgotten", "session": "hermes:drop-1", "messages_removed": 2}
+    # Hermes still has the session, and a refresh doesn't bring it back.
+    provider._history.refresh()
+    assert session_ids(call(provider, "brain_search", query="dunlin", side="history")) == ["hermes:keep-1"]
+    assert "error" in call(provider, "brain_get", id="hermes:drop-1")
+    assert "error" in provider._history.forget("rec-not-a-session")
+
+
+def test_the_numbers_for_sessions_are_the_engines_own(plugin_module):
+    """history.py repeats four numbers of the engine's search. A re-vendor that changes them should fail here."""
+    history = plugin_module("history")
+    from brain import reads
+
+    assert (history.SESSIONS_BESIDE, history.SESSIONS_ALONE, history.LEAD_EXCERPTS, history.LEAD_CHARS,
+            history.TITLE_CHARS) == (reads._SESSIONS_BESIDE, reads._SESSIONS_ALONE, reads._SESSION_EXCERPTS_BESIDE,
+                                     reads._SESSION_LEAD_CHARS, reads._SESSION_TITLE_CHARS)
+
+
+def test_hermes_sessions_come_from_the_home_the_provider_was_started_for(plugin_module, tmp_path, monkeypatch):
+    """A gateway serving several profiles gives each provider its own home; $HERMES_HOME names only one of them."""
+    history = plugin_module("history")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "another-home"))
+    roots = history.roots_for(tmp_path / "this-home")
+    assert roots.hermes_db == tmp_path / "this-home" / "state.db"
+
+
+def test_no_part_of_the_plugin_is_agent_memory(plugin_dir, provider, home):
+    assert not any((plugin_dir / "vendor" / name).exists()
+                   for name in ("session_continuity.py", "session_adapters.py", "ingest.py", "db_permissions.py"))
+    assert (plugin_dir / "vendor" / "brain" / "sessions" / "record.py").is_file()
+    # 0.1.x kept its session index here. It is not made any more.
+    assert not (home / "agent-si" / "sessions.db").exists()
+
+
+def test_recording_off_in_the_settings_leaves_sessions_out(plugin, plugin_module, home, tmp_path, monkeypatch,
+                                                           make_state_db):
+    history = plugin_module("history")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(plugin, "roots_for", lambda hermes_home, **_: history.roots_for(
+        hermes_home, claude=empty / "claude", codex=empty / "codex", grok=empty / "grok"))
+    plugin.settings.save(home, {"principal": "Alex Example", "index_sessions": "no"})
+    make_state_db(home / "state.db", current_schema=True, sessions=[
+        {"id": "quiet-1", "title": "Quiet", "messages": [("user", "the curlew plan is private"), ("assistant", "ok")]}])
+    prov = plugin.AgentSiMemoryProvider()
+    prov.initialize("sess-1", hermes_home=str(home), platform="cli", agent_context="primary")
+    try:
+        assert "not recorded" in call(prov, "brain_search", query="curlew plan", side="history")["error"]
+        assert call(prov, "brain_search", query="curlew plan").get("sessions") is None
+        assert "not recorded" in call(prov, "brain_get", id="hermes:quiet-1")["error"]
+        assert not (prov._brain.dir / "sessions.sqlite3").exists()
+    finally:
+        prov.shutdown()
 
 
 def test_demo_brain_has_a_disputed_fact(plugin_module, plugin_dir, tmp_path):
